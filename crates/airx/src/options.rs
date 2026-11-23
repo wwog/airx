@@ -3,15 +3,20 @@
 //! 与客户端级配置分离：一次请求可以临时追加 Header、设置幂等键，
 //! 而不修改客户端本身。
 
+use std::time::Duration;
+
 use airx_core::AirxError;
 use airx_core::error::ConfigurationError;
 use airx_core::http::{HeaderMap, HeaderName, HeaderValue, HttpRequest};
+use airx_transport::RetryPolicy;
 
 /// 单次请求选项。
 #[derive(Debug, Clone, Default)]
 pub struct RequestOptions {
     headers: HeaderMap,
     idempotency_key: Option<String>,
+    timeout: Option<Duration>,
+    retry_policy: Option<RetryPolicy>,
 }
 
 impl RequestOptions {
@@ -57,6 +62,32 @@ impl RequestOptions {
     pub fn idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
         self
+    }
+
+    /// 单次请求超时。
+    ///
+    /// 非流式请求限制整个调用；流式请求只限制“建立连接”阶段。
+    #[must_use]
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// 单次请求重试策略（覆盖客户端默认值）。
+    #[must_use]
+    pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.retry_policy = Some(retry_policy);
+        self
+    }
+
+    /// 当前单次超时。
+    pub fn get_timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    /// 当前单次重试策略。
+    pub fn get_retry_policy(&self) -> Option<RetryPolicy> {
+        self.retry_policy
     }
 
     pub(crate) fn apply(&self, request: &mut HttpRequest) -> Result<(), AirxError> {

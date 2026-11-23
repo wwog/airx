@@ -118,6 +118,13 @@ impl ChatCompletionRequestBuilder {
         self
     }
 
+    /// 一次性设置完整消息列表（适合 Agent 循环复用历史）。
+    #[must_use]
+    pub fn messages(mut self, messages: impl IntoIterator<Item = ChatMessage>) -> Self {
+        self.messages.extend(messages);
+        self
+    }
+
     /// 追加 system 消息。
     #[must_use]
     pub fn system(self, content: impl Into<String>) -> Self {

@@ -9,6 +9,7 @@
 
 pub mod common;
 pub mod config;
+pub mod embeddings;
 pub mod generate_content;
 pub mod models;
 

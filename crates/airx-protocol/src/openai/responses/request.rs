@@ -4,9 +4,10 @@ use airx_core::AirxError;
 use airx_core::error::ConfigurationError;
 use airx_core::json::Extensions;
 use airx_core::model::ModelId;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{Map, Value};
 
+use super::common::ReasoningSummary;
 use super::tool::ResponsesTool;
 use crate::openai::chat::ToolChoice;
 use crate::openai::common::reasoning::ReasoningEffort;
@@ -21,16 +22,194 @@ pub enum ResponsesInput {
     Items(Vec<InputItem>),
 }
 
-/// 输入项。
+/// 输入消息内容：纯文本或多模态片段。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(untagged)]
+pub enum InputMessageContent {
+    /// 纯文本。
+    Text(String),
+    /// 多模态片段。
+    Parts(Vec<InputContent>),
+}
+
+impl From<&str> for InputMessageContent {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_owned())
+    }
+}
+
+impl From<String> for InputMessageContent {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+/// 输入消息片段。
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputContent {
+    /// `input_text`
+    Text {
+        /// 文本。
+        text: String,
+    },
+    /// `input_image`
+    Image {
+        /// 图片 URL 或 data URI。
+        image_url: Option<String>,
+        /// 已上传文件 ID。
+        file_id: Option<String>,
+        /// 细节级别（`low` / `high` / `auto`）。
+        detail: Option<String>,
+        /// 未识别的扩展字段。
+        extensions: Extensions,
+    },
+    /// `input_file`
+    File {
+        /// 已上传文件 ID。
+        file_id: Option<String>,
+        /// 内联文件数据（base64）。
+        file_data: Option<String>,
+        /// 文件名。
+        filename: Option<String>,
+        /// 未识别的扩展字段。
+        extensions: Extensions,
+    },
+    /// 未识别片段。
+    Other(Value),
+}
+
+impl Serialize for InputContent {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Text { text } => {
+                let mut map = Map::new();
+                map.insert("type".to_owned(), Value::String("input_text".to_owned()));
+                map.insert("text".to_owned(), Value::String(text.clone()));
+                Value::Object(map).serialize(serializer)
+            }
+            Self::Image {
+                image_url,
+                file_id,
+                detail,
+                extensions,
+            } => {
+                let mut map = Map::new();
+                map.insert("type".to_owned(), Value::String("input_image".to_owned()));
+                insert_optional(&mut map, "image_url", image_url.as_deref());
+                insert_optional(&mut map, "file_id", file_id.as_deref());
+                insert_optional(&mut map, "detail", detail.as_deref());
+                insert_extensions(&mut map, extensions);
+                Value::Object(map).serialize(serializer)
+            }
+            Self::File {
+                file_id,
+                file_data,
+                filename,
+                extensions,
+            } => {
+                let mut map = Map::new();
+                map.insert("type".to_owned(), Value::String("input_file".to_owned()));
+                insert_optional(&mut map, "file_id", file_id.as_deref());
+                insert_optional(&mut map, "file_data", file_data.as_deref());
+                insert_optional(&mut map, "filename", filename.as_deref());
+                insert_extensions(&mut map, extensions);
+                Value::Object(map).serialize(serializer)
+            }
+            Self::Other(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for InputContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = Value::deserialize(deserializer)?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+
+        match kind.as_str() {
+            "input_text" => {
+                remove_type(&mut value);
+                let payload: TextContent =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::Text { text: payload.text })
+            }
+            "input_image" => {
+                remove_type(&mut value);
+                let payload: ImageContent =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::Image {
+                    image_url: payload.image_url,
+                    file_id: payload.file_id,
+                    detail: payload.detail,
+                    extensions: payload.extensions,
+                })
+            }
+            "input_file" => {
+                remove_type(&mut value);
+                let payload: FileContent =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::File {
+                    file_id: payload.file_id,
+                    file_data: payload.file_data,
+                    filename: payload.filename,
+                    extensions: payload.extensions,
+                })
+            }
+            _ => Ok(Self::Other(value)),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct TextContent {
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct ImageContent {
+    #[serde(default)]
+    image_url: Option<String>,
+    #[serde(default)]
+    file_id: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(flatten)]
+    extensions: Extensions,
+}
+
+#[derive(Deserialize)]
+struct FileContent {
+    #[serde(default)]
+    file_id: Option<String>,
+    #[serde(default)]
+    file_data: Option<String>,
+    #[serde(default)]
+    filename: Option<String>,
+    #[serde(flatten)]
+    extensions: Extensions,
+}
+
+/// 输入项。
+#[derive(Debug, Clone, PartialEq)]
 pub enum InputItem {
     /// 消息。
     Message {
         /// 角色。
         role: String,
-        /// 文本内容。
-        content: String,
+        /// 文本或多模态内容。
+        content: InputMessageContent,
+    },
+    /// 已有的函数调用 item（手动回传历史时使用）。
+    FunctionCall {
+        /// 调用 ID。
+        call_id: String,
+        /// 函数名。
+        name: String,
+        /// 参数 JSON 字符串。
+        arguments: String,
     },
     /// 函数调用结果。
     FunctionCallOutput {
@@ -39,6 +218,213 @@ pub enum InputItem {
         /// 结果文本。
         output: String,
     },
+    /// Reasoning item（原样回传以保留推理状态）。
+    Reasoning {
+        /// item ID。
+        id: Option<String>,
+        /// 摘要。
+        summary: Option<Vec<ReasoningSummary>>,
+        /// 加密内容。
+        encrypted_content: Option<String>,
+        /// 未识别的扩展字段。
+        extensions: Extensions,
+    },
+    /// item 引用。
+    ItemReference {
+        /// item ID。
+        id: String,
+    },
+    /// 未识别 item（原样保留）。
+    Other(Value),
+}
+
+impl Serialize for InputItem {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Message { role, content } => {
+                let mut map = Map::new();
+                map.insert("type".to_owned(), Value::String("message".to_owned()));
+                map.insert("role".to_owned(), Value::String(role.clone()));
+                map.insert(
+                    "content".to_owned(),
+                    serde_json::to_value(content).map_err(serde::ser::Error::custom)?,
+                );
+                Value::Object(map).serialize(serializer)
+            }
+            Self::FunctionCall {
+                call_id,
+                name,
+                arguments,
+            } => {
+                let mut map = Map::new();
+                map.insert("type".to_owned(), Value::String("function_call".to_owned()));
+                map.insert("call_id".to_owned(), Value::String(call_id.clone()));
+                map.insert("name".to_owned(), Value::String(name.clone()));
+                map.insert("arguments".to_owned(), Value::String(arguments.clone()));
+                Value::Object(map).serialize(serializer)
+            }
+            Self::FunctionCallOutput { call_id, output } => {
+                let mut map = Map::new();
+                map.insert(
+                    "type".to_owned(),
+                    Value::String("function_call_output".to_owned()),
+                );
+                map.insert("call_id".to_owned(), Value::String(call_id.clone()));
+                map.insert("output".to_owned(), Value::String(output.clone()));
+                Value::Object(map).serialize(serializer)
+            }
+            Self::Reasoning {
+                id,
+                summary,
+                encrypted_content,
+                extensions,
+            } => {
+                let mut map = Map::new();
+                map.insert("type".to_owned(), Value::String("reasoning".to_owned()));
+                if let Some(id) = id {
+                    map.insert("id".to_owned(), Value::String(id.clone()));
+                }
+                if let Some(summary) = summary {
+                    map.insert(
+                        "summary".to_owned(),
+                        serde_json::to_value(summary).map_err(serde::ser::Error::custom)?,
+                    );
+                }
+                if let Some(encrypted_content) = encrypted_content {
+                    map.insert(
+                        "encrypted_content".to_owned(),
+                        Value::String(encrypted_content.clone()),
+                    );
+                }
+                insert_extensions(&mut map, extensions);
+                Value::Object(map).serialize(serializer)
+            }
+            Self::ItemReference { id } => {
+                let mut map = Map::new();
+                map.insert(
+                    "type".to_owned(),
+                    Value::String("item_reference".to_owned()),
+                );
+                map.insert("id".to_owned(), Value::String(id.clone()));
+                Value::Object(map).serialize(serializer)
+            }
+            Self::Other(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for InputItem {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = Value::deserialize(deserializer)?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+
+        match kind.as_str() {
+            "message" => {
+                remove_type(&mut value);
+                let payload: MessagePayload =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::Message {
+                    role: payload.role,
+                    content: payload.content,
+                })
+            }
+            "function_call" => {
+                remove_type(&mut value);
+                let payload: FunctionCallPayload =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::FunctionCall {
+                    call_id: payload.call_id,
+                    name: payload.name,
+                    arguments: payload.arguments,
+                })
+            }
+            "function_call_output" => {
+                remove_type(&mut value);
+                let payload: FunctionCallOutputPayload =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::FunctionCallOutput {
+                    call_id: payload.call_id,
+                    output: payload.output,
+                })
+            }
+            "reasoning" => {
+                remove_type(&mut value);
+                let payload: ReasoningPayload =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::Reasoning {
+                    id: payload.id,
+                    summary: payload.summary,
+                    encrypted_content: payload.encrypted_content,
+                    extensions: payload.extensions,
+                })
+            }
+            "item_reference" => {
+                remove_type(&mut value);
+                let payload: ItemReferencePayload =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::ItemReference { id: payload.id })
+            }
+            _ => Ok(Self::Other(value)),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct MessagePayload {
+    role: String,
+    content: InputMessageContent,
+}
+
+#[derive(Deserialize)]
+struct FunctionCallPayload {
+    call_id: String,
+    name: String,
+    arguments: String,
+}
+
+#[derive(Deserialize)]
+struct FunctionCallOutputPayload {
+    call_id: String,
+    output: String,
+}
+
+#[derive(Deserialize)]
+struct ReasoningPayload {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    summary: Option<Vec<ReasoningSummary>>,
+    #[serde(default)]
+    encrypted_content: Option<String>,
+    #[serde(flatten)]
+    extensions: Extensions,
+}
+
+#[derive(Deserialize)]
+struct ItemReferencePayload {
+    id: String,
+}
+
+fn insert_optional(map: &mut Map<String, Value>, key: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        map.insert(key.to_owned(), Value::String(value.to_owned()));
+    }
+}
+
+fn insert_extensions(map: &mut Map<String, Value>, extensions: &Extensions) {
+    for (key, value) in extensions {
+        map.insert(key.clone(), value.clone());
+    }
+}
+
+fn remove_type(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.remove("type");
+    }
 }
 
 /// 推理配置。
@@ -47,6 +433,9 @@ pub struct Reasoning {
     /// 推理投入等级。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
+    /// 摘要展示方式（`auto` / `concise` / `detailed`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -58,6 +447,9 @@ pub struct TextConfig {
     /// 输出格式。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<TextFormat>,
+    /// 输出详细程度（`low` / `medium` / `high`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<String>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -94,6 +486,9 @@ pub struct ResponsesRequest {
     /// 输入。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<ResponsesInput>,
+    /// 基于已有响应继续。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_response_id: Option<String>,
     /// 系统指令。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -121,6 +516,36 @@ pub struct ResponsesRequest {
     /// 文本输出配置。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<TextConfig>,
+    /// 是否存储响应。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
+    /// 后台执行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
+    /// 额外返回字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<Vec<String>>,
+    /// 截断策略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<String>,
+    /// 会话（字符串 ID 或对象，原样保留）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<Value>,
+    /// 元数据。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+    /// 服务等级。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    /// Prompt 缓存键。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    /// 安全标识。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_identifier: Option<String>,
+    /// 最大工具调用次数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_calls: Option<u32>,
     /// 是否流式。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
@@ -141,6 +566,7 @@ impl ResponsesRequest {
 pub struct ResponsesRequestBuilder {
     model: Option<ModelId>,
     input: Option<ResponsesInput>,
+    previous_response_id: Option<String>,
     instructions: Option<String>,
     max_output_tokens: Option<u32>,
     temperature: Option<f32>,
@@ -150,6 +576,16 @@ pub struct ResponsesRequestBuilder {
     parallel_tool_calls: Option<bool>,
     reasoning: Option<Reasoning>,
     text: Option<TextConfig>,
+    store: Option<bool>,
+    background: Option<bool>,
+    include: Option<Vec<String>>,
+    truncation: Option<String>,
+    conversation: Option<Value>,
+    metadata: Option<Value>,
+    service_tier: Option<String>,
+    prompt_cache_key: Option<String>,
+    safety_identifier: Option<String>,
+    max_tool_calls: Option<u32>,
     stream: Option<bool>,
     extensions: Extensions,
 }
@@ -169,10 +605,17 @@ impl ResponsesRequestBuilder {
         self
     }
 
-    /// 设置 item 列表输入。
+    /// 设置 item 列表输入（适合 Agent 循环复用完整历史）。
     #[must_use]
-    pub fn input_items(mut self, items: Vec<InputItem>) -> Self {
-        self.input = Some(ResponsesInput::Items(items));
+    pub fn input_items(mut self, items: impl IntoIterator<Item = InputItem>) -> Self {
+        self.input = Some(ResponsesInput::Items(items.into_iter().collect()));
+        self
+    }
+
+    /// 基于已有响应继续。
+    #[must_use]
+    pub fn previous_response_id(mut self, id: impl Into<String>) -> Self {
+        self.previous_response_id = Some(id.into());
         self
     }
 
@@ -204,7 +647,7 @@ impl ResponsesRequestBuilder {
         self
     }
 
-    /// 设置工具（函数工具或服务端联网工具）。
+    /// 设置工具（函数工具或服务端工具）。
     #[must_use]
     pub fn tools(mut self, tools: impl IntoIterator<Item = ResponsesTool>) -> Self {
         self.tools = Some(tools.into_iter().collect());
@@ -232,10 +675,96 @@ impl ResponsesRequestBuilder {
         self
     }
 
+    /// 设置 reasoning 摘要方式。
+    #[must_use]
+    pub fn reasoning_summary(mut self, summary: impl Into<String>) -> Self {
+        self.reasoning
+            .get_or_insert_with(Reasoning::default)
+            .summary = Some(summary.into());
+        self
+    }
+
     /// 设置文本输出格式。
     #[must_use]
     pub fn text_format(mut self, format: TextFormat) -> Self {
         self.text.get_or_insert_with(TextConfig::default).format = Some(format);
+        self
+    }
+
+    /// 设置文本详细程度。
+    #[must_use]
+    pub fn text_verbosity(mut self, verbosity: impl Into<String>) -> Self {
+        self.text.get_or_insert_with(TextConfig::default).verbosity = Some(verbosity.into());
+        self
+    }
+
+    /// 是否存储响应。
+    #[must_use]
+    pub fn store(mut self, store: bool) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// 是否后台执行。
+    #[must_use]
+    pub fn background(mut self, background: bool) -> Self {
+        self.background = Some(background);
+        self
+    }
+
+    /// 追加额外返回字段。
+    #[must_use]
+    pub fn include(mut self, include: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.include = Some(include.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// 设置截断策略。
+    #[must_use]
+    pub fn truncation(mut self, truncation: impl Into<String>) -> Self {
+        self.truncation = Some(truncation.into());
+        self
+    }
+
+    /// 设置会话（字符串 ID 或对象）。
+    #[must_use]
+    pub fn conversation(mut self, conversation: Value) -> Self {
+        self.conversation = Some(conversation);
+        self
+    }
+
+    /// 设置元数据。
+    #[must_use]
+    pub fn metadata(mut self, metadata: Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    /// 设置服务等级。
+    #[must_use]
+    pub fn service_tier(mut self, service_tier: impl Into<String>) -> Self {
+        self.service_tier = Some(service_tier.into());
+        self
+    }
+
+    /// 设置 Prompt 缓存键。
+    #[must_use]
+    pub fn prompt_cache_key(mut self, key: impl Into<String>) -> Self {
+        self.prompt_cache_key = Some(key.into());
+        self
+    }
+
+    /// 设置安全标识。
+    #[must_use]
+    pub fn safety_identifier(mut self, identifier: impl Into<String>) -> Self {
+        self.safety_identifier = Some(identifier.into());
+        self
+    }
+
+    /// 设置最大工具调用次数。
+    #[must_use]
+    pub fn max_tool_calls(mut self, max_tool_calls: u32) -> Self {
+        self.max_tool_calls = Some(max_tool_calls);
         self
     }
 
@@ -262,6 +791,7 @@ impl ResponsesRequestBuilder {
         Ok(ResponsesRequest {
             model,
             input: self.input,
+            previous_response_id: self.previous_response_id,
             instructions: self.instructions,
             max_output_tokens: self.max_output_tokens,
             temperature: self.temperature,
@@ -271,6 +801,16 @@ impl ResponsesRequestBuilder {
             parallel_tool_calls: self.parallel_tool_calls,
             reasoning: self.reasoning,
             text: self.text,
+            store: self.store,
+            background: self.background,
+            include: self.include,
+            truncation: self.truncation,
+            conversation: self.conversation,
+            metadata: self.metadata,
+            service_tier: self.service_tier,
+            prompt_cache_key: self.prompt_cache_key,
+            safety_identifier: self.safety_identifier,
+            max_tool_calls: self.max_tool_calls,
             stream: self.stream,
             extensions: self.extensions,
         })
@@ -302,5 +842,67 @@ mod alignment_tests {
         assert_eq!(value["text"]["format"]["type"], "json_schema");
         assert_eq!(value["text"]["format"]["name"], "poster");
         assert_eq!(value["text"]["format"]["strict"], true);
+    }
+
+    #[test]
+    fn input_item_roundtrips_reasoning_and_multimodal() {
+        let items = vec![
+            InputItem::Message {
+                role: "user".to_owned(),
+                content: InputMessageContent::Parts(vec![
+                    InputContent::Text {
+                        text: "describe".to_owned(),
+                    },
+                    InputContent::Image {
+                        image_url: Some("https://example.com/cat.png".to_owned()),
+                        file_id: None,
+                        detail: Some("auto".to_owned()),
+                        extensions: Extensions::new(),
+                    },
+                ]),
+            },
+            InputItem::Reasoning {
+                id: Some("rs_1".to_owned()),
+                summary: Some(vec![ReasoningSummary::text("thought")]),
+                encrypted_content: Some("cipher".to_owned()),
+                extensions: Extensions::new(),
+            },
+            InputItem::FunctionCall {
+                call_id: "call_1".to_owned(),
+                name: "lookup".to_owned(),
+                arguments: "{\"q\":1}".to_owned(),
+            },
+            InputItem::FunctionCallOutput {
+                call_id: "call_1".to_owned(),
+                output: "ok".to_owned(),
+            },
+            InputItem::ItemReference {
+                id: "item_1".to_owned(),
+            },
+        ];
+
+        let value = serde_json::to_value(&items).expect("serialize");
+        let back: Vec<InputItem> = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back, items);
+    }
+
+    #[test]
+    fn new_request_fields_serialize() {
+        let request = ResponsesRequest::builder()
+            .model("gpt-5")
+            .previous_response_id("resp_1")
+            .store(true)
+            .include(["reasoning.encrypted_content"])
+            .reasoning_summary("detailed")
+            .text_verbosity("low")
+            .build()
+            .expect("request");
+
+        let value = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(value["previous_response_id"], "resp_1");
+        assert_eq!(value["store"], true);
+        assert_eq!(value["include"][0], "reasoning.encrypted_content");
+        assert_eq!(value["reasoning"]["summary"], "detailed");
+        assert_eq!(value["text"]["verbosity"], "low");
     }
 }

@@ -12,9 +12,9 @@ airx 是**请求工具**：一次 `messages().create(...)` 拿到 `MessagesRespo
 | airx 负责 | 边界之外（不提供） |
 | --- | --- |
 | 请求构造、URL / 认证 Header、JSON 编解码 | Agent 工具执行循环：只解析 `tool_use`，不执行、不循环 |
-| 连接池、TLS、超时、重试、流式读取 | 会话 / 状态管理；Files、Batches、Skills、Memory、Vector Store、Realtime、Fine-tuning |
-| 响应 / SSE / 错误体解析、Accumulator | Agent 编排、多轮工具结果回传策略 |
-| `RequestOptions`、`ResponseMeta`、`futures::Stream`、`parse_as` | 结构化输出只做 serde，不校验 schema / thinking 预算 |
+| 连接池、TLS、超时、重试、流式读取 | 会话 / 状态管理；Skills、Memory、Vector Store、Realtime、Fine-tuning |
+| 响应 / SSE / 错误体解析、Accumulator、Files / Batches | Agent 编排、多轮工具结果回传策略 |
+| `RequestOptions`、`ResponseMeta`、`futures::Stream`、`parse_as`、raw execute | 结构化输出只做 serde，不校验 schema / thinking 预算 |
 
 服务端工具（`web_search` 等）由 Anthropic 后台联网：airx 只发送工具声明、解析
 `server_tool_use` / `web_search_tool_result`，不代发、不代理任何本地网络请求。
@@ -151,7 +151,8 @@ WASM 默认关闭重试，显式启用会报配置错误。
 
 `RequestOptions` 只影响本次调用，不修改客户端，也作用于该 `Messages` 实例的 `count_tokens`：
 `try_header("x-trace-id", "trace-1")` 追加 Header，`idempotency_key("idem-1")` 写
-`Idempotency-Key`，组合后传给 `messages().with_options(...)`（beta Header 示例见 3.2）。
+`Idempotency-Key`，`timeout(...)` / `retry_policy(...)` 覆盖客户端默认值；
+组合后传给 `messages().with_options(...)`（beta Header 示例见 3.2）。
 
 ## 4. Messages 请求
 
@@ -166,6 +167,7 @@ WASM 默认关闭重试，显式启用会报配置错误。
 | `.max_tokens(u32)` | `max_tokens` | 必填，无默认值 |
 | `.system(impl Into<String>)` | `system` | 单个字符串，不是消息数组 |
 | `.message(Message)` / `.user(str)` / `.assistant(str)` | `messages` | 可重复调用 |
+| `.messages(iter)` | `messages` | 一次设置完整历史（`Vec<Message>`），适合 Agent 循环 |
 | `.stop_sequences(iter)` | `stop_sequences` | 字符串数组 |
 | `.tools(iter)` / `.tool_choice(ToolChoice)` | `tools` / `tool_choice` | 见 4.4 |
 | `.thinking(ThinkingConfig)` | `thinking` | 见 4.2 |
@@ -347,6 +349,30 @@ Messages 路径（含 `messages_at` 覆盖），认证与版本 Header 相同。
 
 `list_all` 在 `has_more` 为真且游标前进时继续，游标不再变化即停止，避免死循环。
 
+### 6.3 Files 与 Batches
+
+```rust,ignore
+let file = client.files()
+    .upload("input.pdf", "application/pdf", bytes)
+    .await?;
+let page = client.files()
+    .list(AnthropicListFilesRequest::builder().limit(20).build())
+    .await?;
+let content = client.files().content(&file.id).await?; // Bytes
+client.files().delete(&file.id).await?;
+
+let batch = client.batches().create(AnthropicCreateBatchRequest::new([
+    BatchRequestItem { custom_id: "1".to_owned(), params: messages_request },
+])).await?;
+let current = client.batches().retrieve(&batch.id).await?;
+let results = client.batches().results(&batch.id).await?; // JSONL Bytes
+```
+
+- Files 路径 `/v1/files`，上传为 multipart；Batches 路径跟随 `messages_path`：
+  `{messages_path}/batches`。
+- 结果以 JSONL 返回；逐行解析由调用方完成。
+- Skills / Memory / Vector Store / Realtime / Fine-tuning 仍未封装。
+
 ## 7. 错误与可观测
 
 | `AirxError` 变体 | 触发场景 |
@@ -410,8 +436,10 @@ request.extensions.insert("inference_geo".to_owned(), json!("us"));
 
 ### 8.3 自定义 Endpoint 与 Transport
 
-**当前 Provider 客户端没有公开的 raw execute 入口**：`Messages::endpoint()` 只返回端点
-引用，`ApiClient::execute` 没有公开构造函数。需要完全自定义请求时：
+`Anthropic` 暴露 `execute(HttpRequest)` / `execute_with(HttpRequest, &RequestOptions)`，
+复用认证、版本 Header、重试、超时与压缩；适合未封装接口。
+
+需要完全自定义编码 / 解码时：
 
 1. 实现 `airx_protocol::Endpoint`（`encode` / `decode`），流式再加 `StreamingEndpoint`
    的 `decode_event`，产出 / 消费 `HttpRequest` / `HttpResponse`；
@@ -457,7 +485,7 @@ let response = anthropic.messages().create(MessagesRequest::builder()
 | 能力 | 现状 | 需要时怎么办 |
 | --- | --- | --- |
 | 工具循环 / Agent 编排 | 不提供 | 应用自己维护 `tool_use` → 执行 → `tool_result` |
-| Batches / Files / Skills / Memory / Vector Store / Realtime / Fine-tuning | 未封装 | 走原生 `Endpoint` + `Transport`，或换用对应 SDK |
+| Skills / Memory / Vector Store / Realtime / Fine-tuning | 未封装 | 走原生 `Endpoint` + `Transport`，或换用对应 SDK |
 | 服务端工具本地执行 | 不提供 | Anthropic 后台执行，airx 只声明与解析 |
 | 采样参数 `temperature` / `top_p` / `top_k` | 已从 API 移除 | 用 `output_config.effort` |
 | 流式重试 | 不提供 | 应用层重建请求，事件不可重放 |
@@ -489,9 +517,12 @@ let response = anthropic.messages().create(MessagesRequest::builder()
 | --- | --- |
 | `Client::anthropic()` | 进入 Anthropic 构建器（feature `anthropic`） |
 | `AnthropicBuilder::{api_key, base_url, messages_path, api_version, transport, timeout, retry_policy, build}` | 构造可复用的 `Anthropic` |
-| `Anthropic::{messages, messages_at, models, config}` | 调用入口与配置查看 |
+| `Anthropic::{messages, messages_at, models, files, batches, config}` | 调用入口与配置查看 |
+| `Anthropic::execute(HttpRequest)` | 自定义接口逃生通道 |
 | `Messages::{create, create_with_meta, parse_as, stream, count_tokens, with_options, endpoint}` | Messages 全部能力 |
 | `AnthropicModels::{list, retrieve, list_all, with_options}` | 模型列表与详情 |
+| `AnthropicFiles::{upload, list, retrieve, delete, content}` | 文件上传、列表、下载 |
+| `AnthropicBatches::{create, list, retrieve, cancel, results}` | 消息批处理与结果 |
 | `MessagesRequest::builder()` | 请求构建器（`model` / `max_tokens` 必填） |
 | `MessagesResponse::{text, tool_uses}` | 拼文本、取工具调用 |
 | `MessagesEvent` | `message_start` / `content_block_*` / `message_delta` / `message_stop` / `error` / `Unknown` |
@@ -503,5 +534,5 @@ let response = anthropic.messages().create(MessagesRequest::builder()
 | `OutputEffort` / `JsonOutputFormat::new(schema)` | 推理投入 / 结构化输出 |
 | `CountTokensRequest::builder()` | 计 token 请求（`model` + `messages` 必填） |
 | `AnthropicListModelsRequest::builder()` / `ModelList::next_cursor()` | 模型分页 |
-| `RequestOptions::{new, try_header, header, headers, idempotency_key}` | 单次请求选项 |
+| `RequestOptions::{new, try_header, header, headers, idempotency_key, timeout, retry_policy}` | 单次请求选项 |
 | `WithMeta::{data, meta, into_data}` | 响应 + HTTP 元数据 |

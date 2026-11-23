@@ -12,6 +12,7 @@ pub mod native;
 pub mod response;
 pub mod retry;
 pub mod stream;
+pub mod timeout;
 pub mod transport;
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub mod wasm;
@@ -25,6 +26,7 @@ pub use retry::RetryPolicy;
 #[cfg(not(target_arch = "wasm32"))]
 pub use retry::RetryTransport;
 pub use stream::{ByteStream, byte_stream};
+pub use timeout::with_timeout;
 pub use transport::{BoxFuture, Transport};
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub use wasm::WasmTransport;

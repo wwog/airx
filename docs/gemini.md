@@ -16,7 +16,7 @@ airx 负责单次请求的完整链路：请求构造 → JSON 编码 → HTTP �
 | 官方 JSON 字段双向编解码、未知字段保留 | 会话 / 状态管理：多轮 `contents` 历史由调用方维护 |
 | SSE、增量事件、`GenerateContentStreamAccumulator` | Vector Store / Corpora / Semantic Retrieval |
 | 连接池、TLS、超时、重试、单次请求 Header | Live / Realtime API（WebSocket） |
-| 状态码、响应头、request id、原始 body | Files 上传、Batches、Fine-tuning、Embeddings |
+| 状态码、响应头、request id、原始 body、Embeddings | Files 上传、Batches、Fine-tuning |
 | Gemini `error` 错误体 → `ProviderError` | Vertex AI（端点与 OAuth 认证均不同） |
 | `extensions` 透传、`Part::Other`、服务端工具声明 | — |
 
@@ -336,7 +336,9 @@ let response = with_meta.data;
 `snapshot()` 可取部分结果且不要求完成，`status()` 返回 `airx-core` 的 `StreamStatus`。
 文本按 thought 标记分段拼接，`functionCall` 原样追加；终态后只吸收 usage 与扩展字段。
 
-## 6. 计 token 与模型列表
+## 6. 计 token、模型列表与 Embeddings
+
+### 6.1 countTokens
 
 ```rust
 let tokens = gemini
@@ -354,6 +356,8 @@ println!("{}", tokens.total_tokens);
 路径为 `POST {base}/models/{model}:countTokens`，模型同样在路径中。请求字段：
 `contents` / `systemInstruction` / `tools` / `generationConfig`；响应字段：
 `total_tokens`、`cached_content_token_count`、`prompt_tokens_details`（`Value`）。
+
+### 6.2 模型列表
 
 ```rust
 let page = gemini
@@ -379,6 +383,28 @@ let all = gemini
 `Model` 字段：`name`、`base_model_id`、`version`、`display_name`、`description`、
 `input_token_limit`、`output_token_limit`、`supported_generation_methods`、
 `temperature` / `top_p` / `top_k`、`extensions`。
+
+### 6.3 Embeddings
+
+```rust
+let embeddings = gemini.embed_content("gemini-embedding-001");
+
+let response = embeddings.create(
+    EmbedContentRequest::builder()
+        .text("hello")
+        .task_type("RETRIEVAL_QUERY")
+        .output_dimensionality(256)
+        .build()?,
+).await?;
+
+let batch = embeddings.batch([
+    EmbedContentRequest::builder().text("a").build()?,
+    EmbedContentRequest::builder().text("b").build()?,
+]).await?;
+```
+
+路径为 `POST {base}/{model}:embedContent` 与 `:batchEmbedContents`；批量请求会自动为每条
+item 写入 `model`。
 
 ## 7. 错误与可观测
 
@@ -419,19 +445,19 @@ Gemini 错误体 `{"error": {"code", "message", "status", "details"}}` 映射为
 - **服务端工具**：`GeminiTool::server(...)` 原样写入 `tools`；联网与代码执行发生在
   Provider 后台，airx 只解析结果（`executableCode` / `codeExecutionResult` 为强类型，
   grounding / citation 为 `Value`），**不发本地 HTTP 请求**。
-- **自定义 Endpoint + Transport**：门面没有 raw execute（`Executor`、`ApiClient::new`、
-  `ProtocolStream::new` 均为 crate 内部）。先 `use airx::Endpoint;`，再用
+- **自定义 Endpoint + Transport**：`Gemini` 暴露 `execute(HttpRequest)` /
+  `execute_with(HttpRequest, &RequestOptions)`，复用认证、重试、超时与压缩。
+  需要自定义编码 / 解码时，先 `use airx::Endpoint;`，再用
   `endpoint.encode(&request)?` → 自定义 `Transport::execute` → `endpoint.decode(raw)?`；
-  这会绕过执行级 Header、`User-Agent`、`RequestOptions` 与内置重试。
-  自定义 Transport 需直接依赖 `airx-core` / `airx-transport`；
-  流式未建模接口需自己读 SSE，或在 `airx-protocol` 增加 typed endpoint 并暴露客户端方法。
+  后者会绕过执行级 Header 与内置重试。自定义 Transport 需直接依赖
+  `airx-core` / `airx-transport`；流式未建模接口需自己读 SSE，或在 `airx-protocol`
+  增加 typed endpoint 并暴露客户端方法。
 
 | 未封装 | 现状与替代路径 |
 | --- | --- |
 | cachedContents CRUD | 可用 `cached_content("cachedContents/...")` 引用已有缓存；创建 / 读取 / 删除需自建 Endpoint |
 | Files API | 可用 `Part::file(mime, fileUri)` 引用已有文件、`Part::inline_image` 传 base64；上传 / 列举未封装 |
 | Batches | 未封装，自建 Endpoint |
-| Embeddings（`embedContent`） | 属另一 API，未封装；自建 Endpoint |
 | Vertex AI | 端点与认证不同（OAuth），`x-goog-api-key` 不适用 |
 | Live / Realtime、Corpora / Semantic Retrieval | 不在 Transport / 本库范围，边界之外 |
 
@@ -476,11 +502,13 @@ let next = GenerateContentRequest::builder()
 | `Client::gemini()` | 静态入口，返回 `GeminiBuilder` |
 | `GeminiBuilder::api_key / base_url / transport / timeout / retry_policy / build` | 构建 `Gemini` |
 | `Gemini::generate_content(model)` | 进入 `GenerateContent`，模型在此确定 |
-| `Gemini::models()` / `config()` | 模型 API / 查看配置 |
+| `Gemini::models()` / `embed_content(model)` / `config()` | 模型 API / 向量 / 查看配置 |
+| `Gemini::execute(HttpRequest)` | 自定义接口逃生通道 |
 | `GenerateContent::create` / `create_with_meta` / `parse_as::<T>` | 非流式 / 带元数据 / 解析为 `T` |
 | `GenerateContent::count_tokens` / `stream` | 计 token / 流式（需 `stream`） |
 | `GenerateContent::with_options` / `endpoint` / `stream_endpoint` | 单次选项 / 取端点 |
 | `GeminiModels::list` / `get` / `list_all` / `with_options` | 模型列表、详情、自动翻页 |
+| `GeminiEmbeddings::create` / `batch` | 单条 / 批量向量 |
 | `GenerateContentRequest::builder()` | `user` / `system` / `tools` / `thinking` / `json_schema` … |
 | `Content::user_text` / `model_text` / `parts` | 构造一轮内容 |
 | `Part::text` / `thought` / `inline_image` / `file` / `function_call` / `function_response` | 构造片段 |
@@ -496,7 +524,7 @@ let next = GenerateContentRequest::builder()
 | `GeminiCountTokensRequest::builder()` | `content` / `user` / `system` / `tools` / `generation_config` |
 | `GeminiListModelsRequest::builder()` | `page_size` / `page_token` / `build` |
 | `Model` / `ModelList` | 模型字段与 `next_cursor()` |
-| `RequestOptions::new` / `try_header` / `idempotency_key` | 单次 Header 与幂等键 |
+| `RequestOptions::new` / `try_header` / `idempotency_key` / `timeout` / `retry_policy` | 单次请求选项 |
 | `WithMeta { data, meta }` / `ResponseMeta` / `StreamMeta` | 数据 + HTTP 元数据 |
 | `RetryPolicy::standard` / `disabled` / `with_max_retries` | 重试策略 |
 | `AirxError::request_id` / `is_rate_limit` / `retry_after` / `response_headers` | 错误访问器 |

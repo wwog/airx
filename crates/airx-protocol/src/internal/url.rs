@@ -14,6 +14,7 @@ pub(crate) fn is_absolute_url(path: &str) -> bool {
 }
 
 /// 规范化并校验模式路径。
+#[cfg(any(feature = "openai", feature = "anthropic"))]
 pub(crate) fn endpoint_path(path: &str, label: &str) -> Result<String, AirxError> {
     let text = path.trim();
     if text.is_empty() {
@@ -71,6 +72,7 @@ fn config_error(message: impl Into<String>) -> AirxError {
 mod tests {
     use super::*;
 
+    #[cfg(any(feature = "openai", feature = "anthropic"))]
     #[test]
     fn relative_paths_get_a_leading_slash() {
         assert_eq!(endpoint_path("v2/chat", "path").expect("path"), "/v2/chat");
@@ -80,6 +82,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(feature = "openai", feature = "anthropic"))]
     #[test]
     fn absolute_urls_are_kept_verbatim() {
         assert_eq!(
@@ -88,6 +91,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(feature = "openai", feature = "anthropic"))]
     #[test]
     fn invalid_paths_are_rejected() {
         for path in ["", " ", "//gateway.example.com/x", "https://", "/a b"] {

@@ -142,18 +142,49 @@ let tokens = anthropic
     .await?;
 ```
 
-默认策略对齐官方 SDK：native 2 次重试、10 秒连接超时、`User-Agent: airx/<version>`；
-整体请求超时默认关闭，避免截断长流。`RequestOptions` 可临时覆盖 Header 与幂等键。
+默认策略对齐官方 SDK：native 2 次重试、10 秒连接超时、gzip / brotli / deflate 解压、
+`User-Agent: airx/<version>`；整体请求超时默认关闭，避免截断长流。
+`RequestOptions` 可临时覆盖 Header、幂等键、超时与重试策略；Provider 客户端提供
+`execute(HttpRequest)` 作为自定义接口的逃生通道。
+
+请求输入直接接受完整历史列表，适合循环：
+
+```rust,ignore
+let request = ChatCompletionRequest::builder()
+    .model("gpt-4o-mini")
+    .messages(history)          // Vec<ChatMessage>，而不是逐条 .user()
+    .build()?;
+```
+
+文件 / 批处理 / Embeddings：
+
+```rust,ignore
+let file = openai.files().upload("input.jsonl", "batch", bytes).await?;
+let batch = openai.batches().create(
+    CreateBatchRequest::builder()
+        .input_file_id(&file.id)
+        .endpoint("/v1/chat/completions")
+        .completion_window("24h")
+        .build()?,
+).await?;
+
+let embedding = openai.embeddings().create(
+    EmbeddingRequest::builder().model("text-embedding-3-small").input("hello").build()?,
+).await?;
+```
+
+Anthropic 提供 Files / Batches；Gemini 提供 Embeddings（文件/批处理使用原生 Endpoint）。
 
 ## Feature
 
-默认启用 `native + rustls-tls + all-providers + stream`，即三协议开箱即用。
+默认启用 `native + rustls-tls + compression + all-providers + stream`，即三协议开箱即用。
 
 | Feature | 功能 | 默认 |
 | --- | --- | --- |
 | `native` | Reqwest 原生 HTTP 传输（连接池、超时、TLS） | ✅ |
 | `rustls-tls` | Reqwest 使用 rustls TLS 后端 | ✅ |
 | `native-tls` | Reqwest 使用系统 native-tls；与 `rustls-tls` 二选一 | — |
+| `compression` | gzip / brotli / deflate 响应解压 | ✅ |
 | `wasm` | 浏览器 Fetch 传输（含 `ReadableStream` 流式；用于 wasm32） | — |
 | `all-providers` | 启用全部协议：`openai` + `anthropic` + `gemini` | ✅ |
 | `openai` | OpenAI Chat Completions + Responses | ✅（经 `all-providers`） |
@@ -233,11 +264,14 @@ DEEPSEEK_API_KEY=sk-... cargo run -p airx --example deepseek_json
   OpenAI `max_tokens` 已弃用。DeepSeek 是 OpenAI / Anthropic 兼容部署，不设独立协议，
   结构化输出走 JSON mode（`response_format=json_object`）。对齐基准与来源见
   [docs/protocol-support.md](docs/protocol-support.md) 与 [docs/compatibility.md](docs/compatibility.md)。
-- Gemini 覆盖 `generateContent` / `streamGenerateContent` / `countTokens` / 模型列表；
-  Vertex AI 专属参数与 Live API 尚未封装，可用 Raw 扩展字段或原生 `Endpoint` 逃生通道。
+- Gemini 覆盖 `generateContent` / `streamGenerateContent` / `countTokens` / 模型列表 /
+  Embeddings；Vertex AI、Live API、Files、Batches 尚未封装，可用 Raw 扩展字段、
+  `execute(HttpRequest)` 或原生 `Endpoint` 逃生通道。
   Gemini 流没有 `[DONE]` 哨兵，聚合器以 `finishReason`（或 `promptFeedback.blockReason`）
   判定完成，缺失时返回 `Incomplete`。
-- 文件、批处理、Embeddings、图片/音频等平台接口尚未封装。
+- 已封装：OpenAI Files / Batches / Embeddings、Anthropic Files / Batches、Gemini Embeddings。
+  图片/音频、Gemini Files / Batches、部分 MCP/服务端工具 item 尚未类型化，可用
+  `extensions`、原生 `Endpoint` 或 `execute(HttpRequest)` 扩展。
 - 服务端联网工具（OpenAI `web_search`、Anthropic `web_search` / `web_fetch`、DeepSeek
   `deepseek_web_search`）由 Provider 后台执行；airx 只声明工具并解析引用/调用记录，
   不代发本地网络请求。

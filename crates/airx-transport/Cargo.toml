@@ -15,6 +15,7 @@ default = ["native", "rustls-tls"]
 native = ["dep:reqwest"]
 rustls-tls = ["reqwest?/rustls"]
 native-tls = ["reqwest?/native-tls"]
+compression = ["reqwest?/gzip", "reqwest?/brotli", "reqwest?/deflate"]
 wasm = [
     "dep:gloo-net",
     "dep:wasm-bindgen",

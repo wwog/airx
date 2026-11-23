@@ -7,6 +7,8 @@ use airx_core::json::Extensions;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+use super::common::ReasoningSummary;
+
 /// Responses 用量。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResponsesUsage {
@@ -88,10 +90,129 @@ pub enum OutputItem {
     Message(MessageItem),
     /// 函数调用。
     FunctionCall(FunctionCallItem),
+    /// reasoning item（需要原样回传以保持推理状态）。
+    Reasoning(ReasoningItem),
     /// 服务端联网搜索调用（OpenAI 后台执行）。
     WebSearchCall(WebSearchCallItem),
+    /// 服务端文件搜索调用。
+    FileSearchCall(FileSearchCallItem),
+    /// 服务端代码解释器调用。
+    CodeInterpreterCall(CodeInterpreterCallItem),
+    /// 服务端图片生成调用。
+    ImageGenerationCall(ImageGenerationCallItem),
+    /// 服务端 MCP 调用。
+    McpCall(McpCallItem),
     /// 未识别类型（原样保留）。
     Other(Value),
+}
+
+/// reasoning item。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReasoningItem {
+    /// item ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// 摘要片段。
+    #[serde(default)]
+    pub summary: Vec<ReasoningSummary>,
+    /// 加密内容（多轮回传时保留）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_content: Option<String>,
+    /// 状态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 文件搜索调用 item。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileSearchCallItem {
+    /// item ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// 状态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// 查询列表。
+    #[serde(default)]
+    pub queries: Vec<String>,
+    /// 结果（结构随官方演进，原样保留）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<Value>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 代码解释器调用 item。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeInterpreterCallItem {
+    /// item ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// 状态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// 代码。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// 结果（结构随官方演进，原样保留）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<Value>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 图片生成调用 item。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageGenerationCallItem {
+    /// item ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// 状态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// base64 图片结果。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// 修订后的提示词。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revised_prompt: Option<String>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// MCP 调用 item。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpCallItem {
+    /// item ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// 状态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// MCP server 标签。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_label: Option<String>,
+    /// 工具名。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// 参数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+    /// 输出。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<Value>,
+    /// 错误。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<Value>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
 }
 
 /// 消息 item。
@@ -317,7 +438,16 @@ impl Serialize for OutputItem {
         let (kind, value) = match self {
             Self::Message(item) => ("message", serde_json::to_value(item)),
             Self::FunctionCall(item) => ("function_call", serde_json::to_value(item)),
+            Self::Reasoning(item) => ("reasoning", serde_json::to_value(item)),
             Self::WebSearchCall(item) => ("web_search_call", serde_json::to_value(item)),
+            Self::FileSearchCall(item) => ("file_search_call", serde_json::to_value(item)),
+            Self::CodeInterpreterCall(item) => {
+                ("code_interpreter_call", serde_json::to_value(item))
+            }
+            Self::ImageGenerationCall(item) => {
+                ("image_generation_call", serde_json::to_value(item))
+            }
+            Self::McpCall(item) => ("mcp_call", serde_json::to_value(item)),
             Self::Other(value) => return value.serialize(serializer),
         };
         inject_type(kind, value, serializer)
@@ -345,7 +475,12 @@ impl<'de> Deserialize<'de> for OutputItem {
         match kind.as_str() {
             "message" => parse!(MessageItem, Message),
             "function_call" => parse!(FunctionCallItem, FunctionCall),
+            "reasoning" => parse!(ReasoningItem, Reasoning),
             "web_search_call" => parse!(WebSearchCallItem, WebSearchCall),
+            "file_search_call" => parse!(FileSearchCallItem, FileSearchCall),
+            "code_interpreter_call" => parse!(CodeInterpreterCallItem, CodeInterpreterCall),
+            "image_generation_call" => parse!(ImageGenerationCallItem, ImageGenerationCall),
+            "mcp_call" => parse!(McpCallItem, McpCall),
             _ => Ok(Self::Other(value)),
         }
     }

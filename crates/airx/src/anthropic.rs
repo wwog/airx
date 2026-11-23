@@ -6,8 +6,18 @@
 use std::sync::Arc;
 
 use airx_core::AirxError;
+use airx_core::http::{HttpRequest, HttpResponse};
 use airx_core::model::ModelId;
 use airx_protocol::anthropic::AnthropicConfig;
+use airx_protocol::anthropic::batches::{
+    BatchEndpoint, BatchList, BatchResultsEndpoint, CreateBatchEndpoint, CreateBatchRequest,
+    ListBatchesEndpoint, ListBatchesRequest, MessageBatch,
+};
+use airx_protocol::anthropic::files::{
+    DeleteFileEndpoint, FileContentEndpoint, FileDeleteResponse, FileList, FileMetadata,
+    ListFilesEndpoint, ListFilesRequest, RetrieveFileEndpoint, UploadFileEndpoint,
+    UploadFileRequest,
+};
 use airx_protocol::anthropic::messages::{
     CountTokensEndpoint, CountTokensRequest, CountTokensResponse, MessagesEndpoint,
     MessagesRequest, MessagesResponse,
@@ -15,6 +25,7 @@ use airx_protocol::anthropic::messages::{
 use airx_protocol::anthropic::models::{
     ListModelsEndpoint, ListModelsRequest, Model, ModelList, RetrieveModelEndpoint,
 };
+use bytes::Bytes;
 use serde::de::DeserializeOwned;
 
 use crate::api::ApiClient;
@@ -41,6 +52,20 @@ impl Anthropic {
         &self.config
     }
 
+    /// 直接执行预编码请求，复用客户端的认证、Header、超时与重试。
+    pub async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, AirxError> {
+        self.executor.execute(request).await
+    }
+
+    /// 与 [`Anthropic::execute`] 相同，并应用单次请求选项。
+    pub async fn execute_with(
+        &self,
+        request: HttpRequest,
+        options: &RequestOptions,
+    ) -> Result<HttpResponse, AirxError> {
+        self.executor.execute_with(request, options).await
+    }
+
     /// Messages API（使用构建时的路径配置）。
     pub fn messages(&self) -> Messages {
         self.messages_with(&self.config)
@@ -57,6 +82,24 @@ impl Anthropic {
     /// Models API。
     pub fn models(&self) -> AnthropicModels {
         AnthropicModels {
+            executor: Arc::clone(&self.executor),
+            config: self.config.clone(),
+            options: RequestOptions::default(),
+        }
+    }
+
+    /// Files API。
+    pub fn files(&self) -> AnthropicFiles {
+        AnthropicFiles {
+            executor: Arc::clone(&self.executor),
+            config: self.config.clone(),
+            options: RequestOptions::default(),
+        }
+    }
+
+    /// Messages Batches API。
+    pub fn batches(&self) -> AnthropicBatches {
+        AnthropicBatches {
             executor: Arc::clone(&self.executor),
             config: self.config.clone(),
             options: RequestOptions::default(),
@@ -197,5 +240,142 @@ impl AnthropicModels {
         }
 
         Ok(all)
+    }
+}
+
+/// Anthropic Files 调用入口。
+#[derive(Clone)]
+pub struct AnthropicFiles {
+    executor: Arc<Executor>,
+    config: AnthropicConfig,
+    options: RequestOptions,
+}
+
+impl AnthropicFiles {
+    /// 设置本次调用的请求选项。
+    #[must_use]
+    pub fn with_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// 上传文件（multipart）。
+    pub async fn upload(
+        &self,
+        filename: impl Into<String>,
+        mime_type: impl Into<String>,
+        data: impl Into<Bytes>,
+    ) -> Result<FileMetadata, AirxError> {
+        let request =
+            UploadFileRequest::new(filename, mime_type, data, crate::multipart::boundary());
+        let api = ApiClient::new(
+            UploadFileEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 列出文件。
+    pub async fn list(&self, request: ListFilesRequest) -> Result<FileList, AirxError> {
+        let api = ApiClient::new(
+            ListFilesEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 获取文件元数据。
+    pub async fn retrieve(&self, id: impl Into<String>) -> Result<FileMetadata, AirxError> {
+        let api = ApiClient::new(
+            RetrieveFileEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+
+    /// 删除文件。
+    pub async fn delete(&self, id: impl Into<String>) -> Result<FileDeleteResponse, AirxError> {
+        let api = ApiClient::new(
+            DeleteFileEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+
+    /// 下载文件内容。
+    pub async fn content(&self, id: impl Into<String>) -> Result<Bytes, AirxError> {
+        let api = ApiClient::new(
+            FileContentEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+}
+
+/// Anthropic Messages Batches 调用入口。
+#[derive(Clone)]
+pub struct AnthropicBatches {
+    executor: Arc<Executor>,
+    config: AnthropicConfig,
+    options: RequestOptions,
+}
+
+impl AnthropicBatches {
+    /// 设置本次调用的请求选项。
+    #[must_use]
+    pub fn with_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// 创建批处理。
+    pub async fn create(&self, request: CreateBatchRequest) -> Result<MessageBatch, AirxError> {
+        let api = ApiClient::new(
+            CreateBatchEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 列出批处理。
+    pub async fn list(&self, request: ListBatchesRequest) -> Result<BatchList, AirxError> {
+        let api = ApiClient::new(
+            ListBatchesEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 获取批处理。
+    pub async fn retrieve(&self, id: impl Into<String>) -> Result<MessageBatch, AirxError> {
+        let api = ApiClient::new(
+            BatchEndpoint::retrieve(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+
+    /// 取消批处理。
+    pub async fn cancel(&self, id: impl Into<String>) -> Result<MessageBatch, AirxError> {
+        let api = ApiClient::new(
+            BatchEndpoint::cancel(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+
+    /// 获取结果 JSONL。
+    pub async fn results(&self, id: impl Into<String>) -> Result<Bytes, AirxError> {
+        let api = ApiClient::new(
+            BatchResultsEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
     }
 }

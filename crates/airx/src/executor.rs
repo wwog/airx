@@ -1,25 +1,33 @@
-//! 请求执行器：组合 Transport、执行级默认 Header 与单次请求选项。
+//! 请求执行器：组合 Transport、执行级默认 Header、单次请求选项与重试。
 
 use std::sync::Arc;
 
 use airx_core::AirxError;
+#[cfg(target_arch = "wasm32")]
+use airx_core::error::ConfigurationError;
 use airx_core::http::{HeaderMap, HeaderName, HeaderValue, HttpRequest, HttpResponse};
 #[cfg(feature = "stream")]
 use airx_transport::HttpStreamResponse;
-use airx_transport::Transport;
+use airx_transport::{RetryPolicy, Transport};
 
 use crate::options::RequestOptions;
 
 pub(crate) struct Executor {
     transport: Arc<dyn Transport>,
     default_headers: HeaderMap,
+    retry_policy: RetryPolicy,
 }
 
 impl Executor {
-    pub(crate) fn new(transport: Arc<dyn Transport>, default_headers: HeaderMap) -> Self {
+    pub(crate) fn new(
+        transport: Arc<dyn Transport>,
+        default_headers: HeaderMap,
+        retry_policy: RetryPolicy,
+    ) -> Self {
         Self {
             transport,
             default_headers,
+            retry_policy,
         }
     }
 
@@ -33,7 +41,13 @@ impl Executor {
         options: &RequestOptions,
     ) -> Result<HttpResponse, AirxError> {
         let request = self.prepare(request, options)?;
-        Ok(self.transport.execute(request).await?)
+        let policy = options.get_retry_policy().unwrap_or(self.retry_policy);
+        let future = self.execute_transport(request, policy);
+
+        match options.get_timeout() {
+            Some(timeout) => Ok(airx_transport::with_timeout(timeout, future).await??),
+            None => future.await,
+        }
     }
 
     #[cfg(feature = "stream")]
@@ -43,7 +57,44 @@ impl Executor {
         options: &RequestOptions,
     ) -> Result<HttpStreamResponse, AirxError> {
         let request = self.prepare(request, options)?;
-        Ok(self.transport.execute_stream(request).await?)
+        // 流式请求不重试；超时只覆盖建连阶段。
+        let future = self.transport.execute_stream(request);
+
+        match options.get_timeout() {
+            Some(timeout) => {
+                let response = airx_transport::with_timeout(timeout, future).await??;
+                Ok(response)
+            }
+            None => Ok(future.await?),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn execute_transport(
+        &self,
+        request: HttpRequest,
+        policy: RetryPolicy,
+    ) -> Result<HttpResponse, AirxError> {
+        if policy.is_enabled() {
+            let retry = airx_transport::RetryTransport::new(self.transport.as_ref(), policy);
+            Ok(retry.execute(request).await?)
+        } else {
+            Ok(self.transport.execute(request).await?)
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn execute_transport(
+        &self,
+        request: HttpRequest,
+        policy: RetryPolicy,
+    ) -> Result<HttpResponse, AirxError> {
+        if policy.is_enabled() {
+            return Err(AirxError::Configuration(ConfigurationError::new(
+                "WASM 目标暂不支持自动重试",
+            )));
+        }
+        Ok(self.transport.execute(request).await?)
     }
 
     /// 应用 Header 的顺序：

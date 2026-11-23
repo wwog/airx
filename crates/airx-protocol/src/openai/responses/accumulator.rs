@@ -8,9 +8,11 @@ use airx_core::json::Extensions;
 use airx_core::stream::StreamStatus;
 use serde_json::Value;
 
+use super::common::ReasoningSummary;
 use super::event::ResponsesEvent;
 use super::response::{
-    FunctionCallItem, MessageItem, OutputContent, OutputItem, OutputText, ResponsesResponse,
+    FunctionCallItem, MessageItem, OutputContent, OutputItem, OutputText, ReasoningItem,
+    RefusalContent, ResponsesResponse,
 };
 
 #[derive(Debug)]
@@ -19,12 +21,19 @@ enum ItemState {
         id: Option<String>,
         role: String,
         text: String,
+        refusal: Option<String>,
     },
     FunctionCall {
         id: Option<String>,
         call_id: String,
         name: String,
         arguments: String,
+    },
+    Reasoning {
+        id: Option<String>,
+        summary: Vec<ReasoningSummary>,
+        encrypted_content: Option<String>,
+        extensions: Extensions,
     },
     Other(serde_json::Value),
 }
@@ -43,6 +52,10 @@ impl ItemState {
                         _ => None,
                     })
                     .collect(),
+                refusal: message.content.iter().find_map(|content| match content {
+                    OutputContent::Refusal(refusal) => Some(refusal.refusal.clone()),
+                    _ => None,
+                }),
             },
             OutputItem::FunctionCall(call) => Self::FunctionCall {
                 id: call.id,
@@ -50,26 +63,53 @@ impl ItemState {
                 name: call.name,
                 arguments: call.arguments,
             },
-            OutputItem::WebSearchCall(call) => Self::Other(
-                serde_json::to_value(OutputItem::WebSearchCall(call)).unwrap_or(Value::Null),
-            ),
+            OutputItem::Reasoning(item) => Self::Reasoning {
+                id: item.id,
+                summary: item.summary,
+                encrypted_content: item.encrypted_content,
+                extensions: item.extensions,
+            },
+            item @ (OutputItem::WebSearchCall(_)
+            | OutputItem::FileSearchCall(_)
+            | OutputItem::CodeInterpreterCall(_)
+            | OutputItem::ImageGenerationCall(_)
+            | OutputItem::McpCall(_)) => {
+                Self::Other(serde_json::to_value(item).unwrap_or(Value::Null))
+            }
             OutputItem::Other(value) => Self::Other(value),
         }
     }
 
     fn into_item(self) -> OutputItem {
         match self {
-            Self::Message { id, role, text } => OutputItem::Message(MessageItem {
+            Self::Message {
                 id,
                 role,
-                content: vec![OutputContent::OutputText(OutputText {
-                    text,
-                    annotations: Vec::new(),
+                text,
+                refusal,
+            } => {
+                let mut content = Vec::new();
+                if !text.is_empty() {
+                    content.push(OutputContent::OutputText(OutputText {
+                        text,
+                        annotations: Vec::new(),
+                        extensions: Extensions::new(),
+                    }));
+                }
+                if let Some(refusal) = refusal {
+                    content.push(OutputContent::Refusal(RefusalContent {
+                        refusal,
+                        extensions: Extensions::new(),
+                    }));
+                }
+                OutputItem::Message(MessageItem {
+                    id,
+                    role,
+                    content,
+                    status: None,
                     extensions: Extensions::new(),
-                })],
-                status: None,
-                extensions: Extensions::new(),
-            }),
+                })
+            }
             Self::FunctionCall {
                 id,
                 call_id,
@@ -82,6 +122,18 @@ impl ItemState {
                 arguments,
                 status: None,
                 extensions: Extensions::new(),
+            }),
+            Self::Reasoning {
+                id,
+                summary,
+                encrypted_content,
+                extensions,
+            } => OutputItem::Reasoning(ReasoningItem {
+                id,
+                summary,
+                encrypted_content,
+                status: None,
+                extensions,
             }),
             Self::Other(value) => OutputItem::Other(value),
         }
@@ -134,6 +186,7 @@ impl ResponsesStreamAccumulator {
                             id: Some(event.item_id.clone()),
                             role: "assistant".to_owned(),
                             text: String::new(),
+                            refusal: None,
                         });
                 if let ItemState::Message { text, .. } = state {
                     text.push_str(&event.delta);
@@ -146,6 +199,76 @@ impl ResponsesStreamAccumulator {
                     *text = event.text;
                 }
             }
+            ResponsesEvent::RefusalDelta(event) => {
+                let state =
+                    self.items
+                        .entry(event.output_index)
+                        .or_insert_with(|| ItemState::Message {
+                            id: Some(event.item_id.clone()),
+                            role: "assistant".to_owned(),
+                            text: String::new(),
+                            refusal: None,
+                        });
+                if let ItemState::Message { refusal, .. } = state {
+                    refusal
+                        .get_or_insert_with(String::new)
+                        .push_str(&event.delta);
+                }
+            }
+            ResponsesEvent::RefusalDone(event) => {
+                let state =
+                    self.items
+                        .entry(event.output_index)
+                        .or_insert_with(|| ItemState::Message {
+                            id: Some(event.item_id.clone()),
+                            role: "assistant".to_owned(),
+                            text: String::new(),
+                            refusal: None,
+                        });
+                if let ItemState::Message { refusal, .. } = state {
+                    *refusal = Some(event.refusal);
+                }
+            }
+            ResponsesEvent::ReasoningSummaryTextDelta(event) => {
+                let state =
+                    self.items
+                        .entry(event.output_index)
+                        .or_insert_with(|| ItemState::Reasoning {
+                            id: Some(event.item_id.clone()),
+                            summary: Vec::new(),
+                            encrypted_content: None,
+                            extensions: Extensions::new(),
+                        });
+                if let ItemState::Reasoning { summary, .. } = state {
+                    let index = event.summary_index as usize;
+                    while summary.len() <= index {
+                        summary.push(ReasoningSummary::text(""));
+                    }
+                    summary[index].text.push_str(&event.delta);
+                }
+            }
+            ResponsesEvent::ReasoningSummaryTextDone(event) => {
+                let state =
+                    self.items
+                        .entry(event.output_index)
+                        .or_insert_with(|| ItemState::Reasoning {
+                            id: Some(event.item_id.clone()),
+                            summary: Vec::new(),
+                            encrypted_content: None,
+                            extensions: Extensions::new(),
+                        });
+                if let ItemState::Reasoning { summary, .. } = state {
+                    let index = event.summary_index as usize;
+                    while summary.len() <= index {
+                        summary.push(ReasoningSummary::text(""));
+                    }
+                    summary[index].text = event.text;
+                }
+            }
+            ResponsesEvent::ContentPartAdded(_)
+            | ResponsesEvent::ContentPartDone(_)
+            | ResponsesEvent::ServerToolCall(_)
+            | ResponsesEvent::InProgress(_) => {}
             ResponsesEvent::FunctionCallArgumentsDelta(event) => {
                 let state = self.items.entry(event.output_index).or_insert_with(|| {
                     ItemState::FunctionCall {
@@ -235,10 +358,16 @@ impl ResponsesStreamAccumulator {
                 .items
                 .values()
                 .map(|state| match state {
-                    ItemState::Message { id, role, text } => ItemState::Message {
+                    ItemState::Message {
+                        id,
+                        role,
+                        text,
+                        refusal,
+                    } => ItemState::Message {
                         id: id.clone(),
                         role: role.clone(),
                         text: text.clone(),
+                        refusal: refusal.clone(),
                     }
                     .into_item(),
                     ItemState::FunctionCall {
@@ -251,6 +380,18 @@ impl ResponsesStreamAccumulator {
                         call_id: call_id.clone(),
                         name: name.clone(),
                         arguments: arguments.clone(),
+                    }
+                    .into_item(),
+                    ItemState::Reasoning {
+                        id,
+                        summary,
+                        encrypted_content,
+                        extensions,
+                    } => ItemState::Reasoning {
+                        id: id.clone(),
+                        summary: summary.clone(),
+                        encrypted_content: encrypted_content.clone(),
+                        extensions: extensions.clone(),
                     }
                     .into_item(),
                     ItemState::Other(value) => OutputItem::Other(value.clone()),

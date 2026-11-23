@@ -14,8 +14,10 @@ pub mod error;
 pub mod http;
 pub mod json;
 pub mod model;
+pub mod multipart;
 pub mod stream;
 
 pub use error::AirxError;
 pub use json::{JsonMode, RawJson};
 pub use model::{ApiVersion, ModelId, ProviderId};
+pub use multipart::{MultipartForm, MultipartPart};

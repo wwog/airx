@@ -406,7 +406,7 @@ SSE 层只认语法，不认 `[DONE]` 等协议约定。
 | 层 | 持有者 | 内容 |
 | --- | --- | --- |
 | 执行级 | `ClientBuilder` → `Executor` | Transport、连接 / 整体超时、`RetryPolicy`、执行级默认 Header |
-| 单次请求 | `RequestOptions` | 临时 Header、`Idempotency-Key` |
+| 单次请求 | `RequestOptions` | 临时 Header、`Idempotency-Key`、timeout、retry override |
 | Provider 级 | `OpenAiConfig` / `AnthropicConfig` / `GeminiConfig` | API Key、base URL、模式路径、API 版本、组织 / 项目、Provider 默认 Header |
 
 Provider 配置的 `Debug` 会隐藏 API Key。
@@ -464,24 +464,29 @@ Provider 配置的 `Debug` 会隐藏 API Key。
 | --- | --- | --- |
 | 响应元数据 | `create_with_meta` → `WithMeta<T> { data, meta }`；`ResponseMeta` 含 status / headers / request id / raw body | `airx/src/response.rs` |
 | 流式元数据 | `ProtocolStream::meta()` / `request_id()` | 同上 |
-| 单次请求选项 | `with_options(RequestOptions)`；追加 Header、`Idempotency-Key` | `airx/src/options.rs` |
+| 单次请求选项 | `with_options(RequestOptions)`；Header、`Idempotency-Key`、timeout、retry override | `airx/src/options.rs` |
 | `futures::Stream` | `ProtocolStream` 实现 `futures_core::Stream`，支持 `TryStreamExt` / `select!` | `airx/src/stream.rs` |
 | 流式收尾 | 各协议 `final_response()` / `final_text()`，内部驱动对应 Accumulator | 同上 |
 | 结构化输出 | `parse_as::<T>()`（Chat / Responses / Messages / Gemini），只做 serde 解析 | 各 Provider 客户端 |
 | 模型列表 | `client.models().list() / retrieve()`；Anthropic / Gemini 支持 `list_all()` 翻页 | 各 Provider 客户端 |
 | 计 token | Anthropic `messages().count_tokens()`；Gemini `generate_content(m).count_tokens()` | 同上 |
+| 文件 / 批处理 / Embeddings | OpenAI `files/batches/embeddings`、Anthropic `files/batches`、Gemini `embed_content` | 各 Provider 客户端 |
+| 完整历史输入 | Chat `.messages(...)`、Messages `.messages(...)`、Gemini `.contents(...)`、Responses `.input_items(...)` | 各请求构建器 |
+| raw execute | `OpenAi/Anthropic/Gemini::execute(HttpRequest)` | 各 Provider 客户端 |
 
-默认策略对齐官方 SDK：native 2 次重试、10 秒连接超时、`User-Agent: airx/<version>`。
-整体超时默认关闭，避免截断长流；需要时通过 `ClientBuilder::timeout` 设置。
+默认策略对齐官方 SDK：native 2 次重试、10 秒连接超时、gzip / brotli / deflate 解压、
+`User-Agent: airx/<version>`。整体超时默认关闭，避免截断长流；需要时通过
+`ClientBuilder::timeout` 设置。
 
 ### 8.1 门面 feature
 
-`airx` 默认启用 `native + rustls-tls + all-providers + stream`。
+`airx` 默认启用 `native + rustls-tls + compression + all-providers + stream`。
 
 | Feature | 作用 |
 | --- | --- |
 | `native` | Reqwest 传输 |
 | `rustls-tls` / `native-tls` | TLS 后端，二选一 |
+| `compression` | gzip / brotli / deflate 响应解压 |
 | `wasm` | 浏览器 Fetch 传输 |
 | `openai` / `anthropic` / `gemini` | 启用对应协议模块 |
 | `all-providers` | 三者全开 |
@@ -532,8 +537,9 @@ json = []
 | 端到端竖切 | `airx/tests/*.rs` | Mock Transport → 编码 → 执行 → 解码 / 流式聚合 |
 | 路径覆盖 | `airx/tests/endpoint_paths.rs` | base_url 与模式路径的构建时 / 运行时覆盖 |
 | SDK 体验 | `airx/tests/sdk_experience.rs`、`models_and_tokens.rs` | 请求选项、响应元数据、`Stream`、parse、默认重试、models / countTokens |
+| 资源与底层接入 | `airx/tests/resources.rs` | Files / Batches / Embeddings、Responses 生命周期、multipart、per-request timeout/retry、raw execute |
 
-当前共 **256** 个测试，`cargo test --workspace` 全绿。
+当前共 **283** 个测试，`cargo test --workspace` 全绿。
 
 关键断言：
 
@@ -571,9 +577,10 @@ cargo check -p airx --target wasm32-unknown-unknown \
 - 流式请求不重试；首个事件前重试尚未实现。
 - WASM 不支持自动重试（默认关闭）；native 默认 2 次。
 - WASM 传输只做编译检查，浏览器运行时未纳入 CI。
-- Gemini 已封装 `generateContent` / `streamGenerateContent` / `countTokens` / 模型列表；
-  Vertex AI 专属参数与 Live API 未封装，可用 `extensions` 或原生 `Endpoint`。
-- 文件、批处理、Embeddings、图片/音频等平台接口尚未封装。
+- Gemini 已封装 `generateContent` / `streamGenerateContent` / `countTokens` / 模型列表 /
+  Embeddings；Vertex AI、Live API、Files、Batches 未封装。
+- 已封装 OpenAI Files / Batches / Embeddings、Anthropic Files / Batches。
+  图片/音频、Vector Store、Fine-tuning、Assistants/Threads 仍不做。
 - 服务端联网工具由 Provider 后台执行；airx 只声明工具并解析引用 / 调用记录，
   不发起本地网络请求。
 - Provider 参数随模型演进；能力与对齐来源以
@@ -605,17 +612,23 @@ crates/
 │   ├── openai/
 │   │   ├── config.rs         # OpenAiConfig
 │   │   ├── models.rs         # 模型列表 / 详情
+│   │   ├── files.rs          # Files（multipart 上传 / 内容）
+│   │   ├── batches.rs        # Batches
+│   │   ├── embeddings.rs     # Embeddings
 │   │   ├── common/           # 错误体 / Usage / ReasoningEffort / Verbosity
 │   │   ├── chat/             # 请求 / 响应 / chunk / event / tool / endpoint / accumulator
-│   │   └── responses/        # 请求 / 响应 / item / event / tool / endpoint / accumulator
+│   │   └── responses/        # 请求 / 响应 / item / event / tool / resource / endpoint / accumulator
 │   ├── anthropic/
 │   │   ├── config.rs         # AnthropicConfig
 │   │   ├── common.rs         # 错误体 / Usage
+│   │   ├── files.rs          # Files
+│   │   ├── batches.rs        # Messages Batches
 │   │   ├── models.rs         # 模型列表 / 详情（cursor 分页）
 │   │   └── messages/         # 请求 / 响应 / 内容块 / event / endpoint / accumulator / count_tokens
 │   └── gemini/
 │       ├── config.rs         # GeminiConfig
 │       ├── common.rs         # 错误体 / SafetyRating / UsageMetadata
+│       ├── embeddings.rs     # embedContent / batchEmbedContents
 │       ├── models.rs         # 模型列表 / 详情（pageToken 分页）
 │       └── generate_content/ # 请求 / 响应 / content / generation / tool / endpoint / accumulator / count_tokens
 ├── airx-transport/src/
@@ -632,11 +645,12 @@ crates/
     ├── builder.rs            # ClientBuilder / Provider 构建器
     ├── executor.rs           # Executor（执行级 Header + Transport + 请求选项）
     ├── api.rs                # ApiClient（encode → execute → decode / meta）
-    ├── options.rs            # RequestOptions（Header / Idempotency-Key）
+    ├── options.rs            # RequestOptions（Header / Idempotency-Key / timeout / retry）
+    ├── multipart.rs          # boundary 生成
     ├── response.rs           # ResponseMeta / StreamMeta / WithMeta / parse_json
     ├── stream.rs             # ProtocolStream + Stream impl + final_* 助手
-    ├── openai.rs             # OpenAi / Chat / Responses / OpenAiModels
-    ├── anthropic.rs          # Anthropic / Messages / AnthropicModels
-    ├── gemini.rs             # Gemini / GenerateContent / GeminiModels
+    ├── openai.rs             # OpenAi / Chat / Responses / Models / Files / Batches / Embeddings
+    ├── anthropic.rs          # Anthropic / Messages / Models / Files / Batches
+    ├── gemini.rs             # Gemini / GenerateContent / Models / Embeddings
     └── prelude.rs            # 常用类型导出
 ```

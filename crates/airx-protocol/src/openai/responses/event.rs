@@ -6,13 +6,29 @@ use airx_core::json::Extensions;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
-use super::response::{OutputItem, ResponsesResponse};
+use super::response::{OutputContent, OutputItem, ResponsesResponse};
 
 /// Responses 流事件。
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResponsesEvent {
     /// `response.created`
     Created(CreatedEvent),
+    /// `response.in_progress` / `response.queued`
+    InProgress(CreatedEvent),
+    /// `response.content_part.added`
+    ContentPartAdded(ContentPartAdded),
+    /// `response.content_part.done`
+    ContentPartDone(ContentPartDone),
+    /// `response.refusal.delta`
+    RefusalDelta(RefusalDelta),
+    /// `response.refusal.done`
+    RefusalDone(RefusalDone),
+    /// `response.reasoning_summary_text.delta`
+    ReasoningSummaryTextDelta(ReasoningSummaryDelta),
+    /// `response.reasoning_summary_text.done`
+    ReasoningSummaryTextDone(ReasoningSummaryDone),
+    /// 服务端工具调用生命周期事件（web_search / file_search / code_interpreter / image_generation / mcp）。
+    ServerToolCall(ServerToolCallEvent),
     /// `response.output_item.added`
     OutputItemAdded(OutputItemAdded),
     /// `response.output_item.done`
@@ -43,7 +59,8 @@ impl<'de> Deserialize<'de> for ResponsesEvent {
         let kind = value
             .get("type")
             .and_then(Value::as_str)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .to_owned();
 
         macro_rules! parse {
             ($ty:ty, $variant:ident) => {{
@@ -56,8 +73,19 @@ impl<'de> Deserialize<'de> for ResponsesEvent {
             }};
         }
 
-        match kind {
+        match kind.as_str() {
             "response.created" => parse!(CreatedEvent, Created),
+            "response.in_progress" | "response.queued" => parse!(CreatedEvent, InProgress),
+            "response.content_part.added" => parse!(ContentPartAdded, ContentPartAdded),
+            "response.content_part.done" => parse!(ContentPartDone, ContentPartDone),
+            "response.refusal.delta" => parse!(RefusalDelta, RefusalDelta),
+            "response.refusal.done" => parse!(RefusalDone, RefusalDone),
+            "response.reasoning_summary_text.delta" => {
+                parse!(ReasoningSummaryDelta, ReasoningSummaryTextDelta)
+            }
+            "response.reasoning_summary_text.done" => {
+                parse!(ReasoningSummaryDone, ReasoningSummaryTextDone)
+            }
             "response.output_item.added" => parse!(OutputItemAdded, OutputItemAdded),
             "response.output_item.done" => parse!(OutputItemDone, OutputItemDone),
             "response.output_text.delta" => parse!(OutputTextDelta, OutputTextDelta),
@@ -72,9 +100,173 @@ impl<'de> Deserialize<'de> for ResponsesEvent {
             "response.failed" => parse!(FailedEvent, Failed),
             "response.incomplete" => parse!(IncompleteEvent, Incomplete),
             "error" => parse!(ErrorEvent, Error),
+            _ if is_server_tool_event(&kind) => {
+                remove_type(&mut value);
+                let mut event: ServerToolCallEvent =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                event.kind = kind.clone();
+                Ok(Self::ServerToolCall(event))
+            }
             _ => Ok(Self::Unknown(value)),
         }
     }
+}
+
+fn is_server_tool_event(kind: &str) -> bool {
+    kind.starts_with("response.")
+        && (kind.contains("web_search_call.")
+            || kind.contains("file_search_call.")
+            || kind.contains("code_interpreter_call.")
+            || kind.contains("image_generation_call.")
+            || kind.contains("mcp_call.")
+            || kind.contains("mcp_list_tools.")
+            || kind.contains("mcp_approval_request."))
+}
+
+fn remove_type(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.remove("type");
+    }
+}
+
+/// `response.content_part.added`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContentPartAdded {
+    /// item ID。
+    pub item_id: String,
+    /// 输出序号。
+    pub output_index: u32,
+    /// 内容序号。
+    #[serde(default)]
+    pub content_index: u32,
+    /// 内容片段。
+    pub part: OutputContent,
+    /// 序号。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_number: Option<u64>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// `response.content_part.done`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContentPartDone {
+    /// item ID。
+    pub item_id: String,
+    /// 输出序号。
+    pub output_index: u32,
+    /// 内容序号。
+    #[serde(default)]
+    pub content_index: u32,
+    /// 内容片段。
+    pub part: OutputContent,
+    /// 序号。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_number: Option<u64>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// `response.refusal.delta`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RefusalDelta {
+    /// item ID。
+    pub item_id: String,
+    /// 输出序号。
+    pub output_index: u32,
+    /// 内容序号。
+    #[serde(default)]
+    pub content_index: u32,
+    /// 拒答增量。
+    pub delta: String,
+    /// 序号。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_number: Option<u64>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// `response.refusal.done`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RefusalDone {
+    /// item ID。
+    pub item_id: String,
+    /// 输出序号。
+    pub output_index: u32,
+    /// 内容序号。
+    #[serde(default)]
+    pub content_index: u32,
+    /// 完整拒答文本。
+    pub refusal: String,
+    /// 序号。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_number: Option<u64>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// `response.reasoning_summary_text.delta`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReasoningSummaryDelta {
+    /// item ID。
+    pub item_id: String,
+    /// 输出序号。
+    pub output_index: u32,
+    /// 摘要序号。
+    #[serde(default)]
+    pub summary_index: u32,
+    /// 文本增量。
+    pub delta: String,
+    /// 序号。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_number: Option<u64>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// `response.reasoning_summary_text.done`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReasoningSummaryDone {
+    /// item ID。
+    pub item_id: String,
+    /// 输出序号。
+    pub output_index: u32,
+    /// 摘要序号。
+    #[serde(default)]
+    pub summary_index: u32,
+    /// 完整摘要文本。
+    pub text: String,
+    /// 序号。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_number: Option<u64>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 服务端工具调用生命周期事件。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerToolCallEvent {
+    /// 事件类型（由解码器写入，不参与 JSON 字段）。
+    #[serde(skip)]
+    pub kind: String,
+    /// item ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// 输出序号。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_index: Option<u32>,
+    /// 序号。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_number: Option<u64>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
 }
 
 /// `response.created`。
@@ -253,6 +445,24 @@ impl Serialize for ResponsesEvent {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let (kind, value) = match self {
             Self::Created(event) => ("response.created", serde_json::to_value(event)),
+            Self::InProgress(event) => ("response.in_progress", serde_json::to_value(event)),
+            Self::ContentPartAdded(event) => {
+                ("response.content_part.added", serde_json::to_value(event))
+            }
+            Self::ContentPartDone(event) => {
+                ("response.content_part.done", serde_json::to_value(event))
+            }
+            Self::RefusalDelta(event) => ("response.refusal.delta", serde_json::to_value(event)),
+            Self::RefusalDone(event) => ("response.refusal.done", serde_json::to_value(event)),
+            Self::ReasoningSummaryTextDelta(event) => (
+                "response.reasoning_summary_text.delta",
+                serde_json::to_value(event),
+            ),
+            Self::ReasoningSummaryTextDone(event) => (
+                "response.reasoning_summary_text.done",
+                serde_json::to_value(event),
+            ),
+            Self::ServerToolCall(event) => (event.kind.as_str(), serde_json::to_value(event)),
             Self::OutputItemAdded(event) => {
                 ("response.output_item.added", serde_json::to_value(event))
             }

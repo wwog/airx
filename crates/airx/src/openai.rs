@@ -6,15 +6,31 @@
 use std::sync::Arc;
 
 use airx_core::AirxError;
+use airx_core::http::{HttpRequest, HttpResponse};
 use airx_core::model::ModelId;
 use airx_protocol::openai::OpenAiConfig;
+use airx_protocol::openai::batches::{
+    BatchEndpoint, BatchList, BatchObject, CreateBatchEndpoint, CreateBatchRequest,
+    ListBatchesEndpoint, ListBatchesRequest,
+};
 use airx_protocol::openai::chat::{
     ChatCompletionRequest, ChatCompletionResponse, ChatEndpoint, StreamOptions,
+};
+use airx_protocol::openai::embeddings::{EmbeddingRequest, EmbeddingResponse, EmbeddingsEndpoint};
+use airx_protocol::openai::files::{
+    DeleteFileEndpoint, FileContentEndpoint, FileDeleteResponse, FileEndpoint, FileList,
+    FileObject, ListFilesEndpoint, ListFilesRequest, UploadFileEndpoint, UploadFileRequest,
 };
 use airx_protocol::openai::models::{
     ListModels, ListModelsEndpoint, Model, ModelList, RetrieveModelEndpoint,
 };
-use airx_protocol::openai::responses::{ResponsesEndpoint, ResponsesRequest, ResponsesResponse};
+use airx_protocol::openai::responses::{
+    CancelResponseEndpoint, CountInputTokensEndpoint, DeleteResponse, DeleteResponseEndpoint,
+    InputItemList, InputTokensCount, InputTokensCountRequest, ListInputItemsEndpoint,
+    ListInputItemsRequest, ResponsesEndpoint, ResponsesRequest, ResponsesResponse,
+    RetrieveResponseEndpoint,
+};
+use bytes::Bytes;
 use serde::de::DeserializeOwned;
 
 use crate::api::ApiClient;
@@ -39,6 +55,20 @@ impl OpenAi {
     /// Provider 配置。
     pub fn config(&self) -> &OpenAiConfig {
         &self.config
+    }
+
+    /// 直接执行预编码请求，复用客户端的认证、Header、超时与重试。
+    pub async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, AirxError> {
+        self.executor.execute(request).await
+    }
+
+    /// 与 [`OpenAi::execute`] 相同，并应用单次请求选项。
+    pub async fn execute_with(
+        &self,
+        request: HttpRequest,
+        options: &RequestOptions,
+    ) -> Result<HttpResponse, AirxError> {
+        self.executor.execute_with(request, options).await
     }
 
     /// Chat Completions API（使用构建时的路径配置）。
@@ -68,6 +98,33 @@ impl OpenAi {
     /// Models API。
     pub fn models(&self) -> OpenAiModels {
         OpenAiModels {
+            executor: Arc::clone(&self.executor),
+            config: self.config.clone(),
+            options: RequestOptions::default(),
+        }
+    }
+
+    /// Embeddings API。
+    pub fn embeddings(&self) -> OpenAiEmbeddings {
+        OpenAiEmbeddings {
+            executor: Arc::clone(&self.executor),
+            config: self.config.clone(),
+            options: RequestOptions::default(),
+        }
+    }
+
+    /// Files API。
+    pub fn files(&self) -> OpenAiFiles {
+        OpenAiFiles {
+            executor: Arc::clone(&self.executor),
+            config: self.config.clone(),
+            options: RequestOptions::default(),
+        }
+    }
+
+    /// Batches API。
+    pub fn batches(&self) -> OpenAiBatches {
+        OpenAiBatches {
             executor: Arc::clone(&self.executor),
             config: self.config.clone(),
             options: RequestOptions::default(),
@@ -197,6 +254,64 @@ impl Responses {
         parse_json(&response.output_text())
     }
 
+    /// 读取已有响应。
+    pub async fn retrieve(&self, id: impl Into<String>) -> Result<ResponsesResponse, AirxError> {
+        let api = ApiClient::new(
+            RetrieveResponseEndpoint::new(self.config()),
+            self.api.executor(),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+
+    /// 取消后台响应。
+    pub async fn cancel(&self, id: impl Into<String>) -> Result<ResponsesResponse, AirxError> {
+        let api = ApiClient::new(
+            CancelResponseEndpoint::new(self.config()),
+            self.api.executor(),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+
+    /// 删除已存储的响应。
+    pub async fn delete(&self, id: impl Into<String>) -> Result<DeleteResponse, AirxError> {
+        let api = ApiClient::new(
+            DeleteResponseEndpoint::new(self.config()),
+            self.api.executor(),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+
+    /// 列出响应的输入 item。
+    pub async fn input_items(
+        &self,
+        request: ListInputItemsRequest,
+    ) -> Result<InputItemList, AirxError> {
+        let api = ApiClient::new(
+            ListInputItemsEndpoint::new(self.config()),
+            self.api.executor(),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 估算输入 token。
+    pub async fn input_tokens_count(
+        &self,
+        request: InputTokensCountRequest,
+    ) -> Result<InputTokensCount, AirxError> {
+        let api = ApiClient::new(
+            CountInputTokensEndpoint::new(self.config()),
+            self.api.executor(),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    fn config(&self) -> OpenAiConfig {
+        self.api.endpoint().config().clone()
+    }
+
     /// 端点引用。
     pub fn endpoint(&self) -> &ResponsesEndpoint {
         self.api.endpoint()
@@ -246,5 +361,157 @@ impl OpenAiModels {
         );
         let model = model.into();
         api.create_with(&model, &self.options).await
+    }
+}
+
+/// OpenAI Embeddings 调用入口。
+#[derive(Clone)]
+pub struct OpenAiEmbeddings {
+    executor: Arc<Executor>,
+    config: OpenAiConfig,
+    options: RequestOptions,
+}
+
+impl OpenAiEmbeddings {
+    /// 设置本次调用的请求选项。
+    #[must_use]
+    pub fn with_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// 创建向量。
+    pub async fn create(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, AirxError> {
+        let api = ApiClient::new(
+            EmbeddingsEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+}
+
+/// OpenAI Files 调用入口。
+#[derive(Clone)]
+pub struct OpenAiFiles {
+    executor: Arc<Executor>,
+    config: OpenAiConfig,
+    options: RequestOptions,
+}
+
+impl OpenAiFiles {
+    /// 设置本次调用的请求选项。
+    #[must_use]
+    pub fn with_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// 上传文件（multipart）。
+    pub async fn upload(
+        &self,
+        filename: impl Into<String>,
+        purpose: impl Into<String>,
+        data: impl Into<Bytes>,
+    ) -> Result<FileObject, AirxError> {
+        let request = UploadFileRequest::new(filename, purpose, data, crate::multipart::boundary());
+        let api = ApiClient::new(
+            UploadFileEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 列出文件。
+    pub async fn list(&self, request: ListFilesRequest) -> Result<FileList, AirxError> {
+        let api = ApiClient::new(
+            ListFilesEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 获取文件元数据。
+    pub async fn retrieve(&self, id: impl Into<String>) -> Result<FileObject, AirxError> {
+        let api = ApiClient::new(
+            FileEndpoint::retrieve(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+
+    /// 删除文件。
+    pub async fn delete(&self, id: impl Into<String>) -> Result<FileDeleteResponse, AirxError> {
+        let api = ApiClient::new(
+            DeleteFileEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+
+    /// 下载文件内容。
+    pub async fn content(&self, id: impl Into<String>) -> Result<Bytes, AirxError> {
+        let api = ApiClient::new(
+            FileContentEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+}
+
+/// OpenAI Batches 调用入口。
+#[derive(Clone)]
+pub struct OpenAiBatches {
+    executor: Arc<Executor>,
+    config: OpenAiConfig,
+    options: RequestOptions,
+}
+
+impl OpenAiBatches {
+    /// 设置本次调用的请求选项。
+    #[must_use]
+    pub fn with_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// 创建批处理。
+    pub async fn create(&self, request: CreateBatchRequest) -> Result<BatchObject, AirxError> {
+        let api = ApiClient::new(
+            CreateBatchEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 获取批处理。
+    pub async fn retrieve(&self, id: impl Into<String>) -> Result<BatchObject, AirxError> {
+        let api = ApiClient::new(
+            BatchEndpoint::retrieve(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+
+    /// 列出批处理。
+    pub async fn list(&self, request: ListBatchesRequest) -> Result<BatchList, AirxError> {
+        let api = ApiClient::new(
+            ListBatchesEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 取消批处理。
+    pub async fn cancel(&self, id: impl Into<String>) -> Result<BatchObject, AirxError> {
+        let api = ApiClient::new(
+            BatchEndpoint::cancel(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
     }
 }

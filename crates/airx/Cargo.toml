@@ -12,12 +12,13 @@ workspace = true
 [features]
 # 默认开箱即用：原生 HTTP + rustls + 全部 Provider + 流式。
 # 需要裁剪时使用 default-features = false 按需选择。
-default = ["native", "rustls-tls", "all-providers", "stream"]
+default = ["native", "rustls-tls", "compression", "all-providers", "stream"]
 
 # 平台后端
 native = ["airx-transport/native"]
 rustls-tls = ["airx-transport/rustls-tls"]
 native-tls = ["airx-transport/native-tls"]
+compression = ["airx-transport/compression"]
 wasm = ["airx-transport/wasm"]
 
 # Provider

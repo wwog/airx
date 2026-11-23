@@ -16,8 +16,8 @@ airx 负责到**协议与 HTTP 边界**：
 | --- | --- |
 | 请求构造、URL / 认证 Header、JSON 编解码 | Agent 工具执行循环：只返回 `tool_calls` / `function_call`，不执行、不循环 |
 | 连接池、TLS、超时、重试、流式读取 | 会话 / 状态管理；Vector Store、Realtime、Fine-tuning、Assistants / Threads |
-| 响应 / SSE / 错误体解析、Accumulator | Batch、Embeddings、Files、图片 / 音频等平台接口 |
-| `RequestOptions`、`ResponseMeta`、`futures::Stream`、`parse_as` | 服务端工具由 OpenAI 后台执行，airx 只声明与解析 |
+| 响应 / SSE / 错误体解析、Accumulator、Files / Batches / Embeddings | 图片 / 音频、Vector Store、Fine-tuning、Assistants / Threads |
+| `RequestOptions`、`ResponseMeta`、`futures::Stream`、`parse_as`、raw execute | 服务端工具由 OpenAI 后台执行，airx 只声明与解析 |
 
 函数工具的 HTTP 请求、参数校验、结果回传由应用完成；airx 支持把结果作为历史消息回传，
 但不维护循环。服务端工具（Responses `web_search`）的调用记录与引用由 airx 解析，不代发请求。
@@ -154,6 +154,7 @@ let request = ChatCompletionRequest::builder()
 | --- | --- | --- |
 | `.model(...)` | `model` | 必填，`ModelId` |
 | `.system / .user / .assistant / .message` | `messages` | 按调用顺序追加 |
+| `.messages(iter)` | `messages` | 一次设置完整历史（`Vec<ChatMessage>`），适合 Agent 循环 |
 | `.temperature(...)` / `.top_p(...)` | 同名 | 采样参数 |
 | `.max_completion_tokens(u32)` | `max_completion_tokens` | **推荐**，含推理 token |
 | `.max_tokens(u32)` | `max_tokens` | 已弃用；o-series 不兼容 |
@@ -291,22 +292,34 @@ let request = ResponsesRequest::builder()
     .build()?;
 ```
 
-### 5.3 当前缺口（按“未支持”理解）
+### 5.3 item / 事件覆盖与剩余缺口
+
+已类型化：
 
 - 请求字段：`previous_response_id`、`store`、`background`、`include`、`truncation`、
-  `metadata`、`service_tier` 等未建模。
-- 输入 item：`function_call`、`reasoning`、多模态 message content 未建模。
-- 输出 item：`reasoning`、`file_search_call`、`code_interpreter_call`、
-  `image_generation_call`、MCP 相关 item 都落在 `OutputItem::Other(Value)`。
-- 流式事件：`response.output_text.annotation.added`、`response.reasoning_summary_text.*`、
-  `response.refusal.delta/done`、`response.web_search_call.*`、
-  `response.file_search_call.*`、`response.code_interpreter_call.*` 等落在
-  `ResponsesEvent::Unknown(Value)`，聚合器会忽略。
+  `conversation`、`metadata`、`service_tier`、`prompt_cache_key`、`safety_identifier`、
+  `max_tool_calls`、`reasoning.summary`、`text.verbosity`。
+- 输入 item：`message`（文本或多模态 `input_text` / `input_image` / `input_file`）、
+  `function_call`、`function_call_output`、`reasoning`、`item_reference`；未知 item 保留为
+  `InputItem::Other(Value)`。
+- 输出 item：`message`、`function_call`、`reasoning`、`web_search_call`、
+  `file_search_call`、`code_interpreter_call`、`image_generation_call`、`mcp_call`；
+  其余保留为 `OutputItem::Other(Value)`。
+- 流式事件：`created` / `in_progress` / `content_part.added·done` / `output_text.delta·done` /
+  `refusal.delta·done` / `reasoning_summary_text.delta·done` /
+  `function_call_arguments.delta·done` / 服务端工具生命周期（`ServerToolCall`）/
+  `completed` / `failed` / `incomplete` / `error`；其余保留为 `Unknown(Value)`。
 
-扩展路径：未建模的顶层字段用 `.extension("previous_response_id", json!("resp_..."))`；
-未建模的 input item 在**不设置** `.input(...)` / `.input_items(...)` 时用
-`.extension("input", json!([...]))`，否则可能出现重复 `input` 键；需要完全控制 body 时
-使用原生 Endpoint。输出 item / 事件需要强类型时，贡献新的 typed endpoint。
+剩余缺口：
+
+- `mcp_list_tools` / `mcp_approval_request`、音频与自定义工具 item 仍落在 `Other`。
+- 标注除 `url_citation` 外仍为 `Annotation::Other(Value)`。
+- `conversation` 以 `Value` 透传，未拆成强类型对象。
+- 服务端工具生命周期事件统一为 `ServerToolCallEvent`（`kind` 区分具体事件）。
+
+扩展路径：未知字段继续用 `.extension(...)`；需要完全控制 body 时使用
+`openai.responses().execute(HttpRequest)` 或自定义 Endpoint。输出 item / 事件需要更细类型时，
+在 `airx-protocol` 增加 typed endpoint / 变体。
 
 ## 6. 响应与流式
 
@@ -407,40 +420,119 @@ let model = client.models().retrieve("gpt-4o-mini").await?;
 `Model { id, object, created, owned_by, extensions }`。模型 id 只允许 ASCII 字母数字与
 `- _ . : /`，非法值在编码阶段返回配置错误。
 
-## 9. 扩展点
+## 9. 文件 / 批处理 / Embeddings
 
-### 9.1 `extensions` 透传未知字段
+这些接口都是普通 typed endpoint，复用同一客户端的认证、超时、重试与 `RequestOptions`。
+
+### 9.1 Files
+
+```rust
+let file = openai.files()
+    .upload("input.jsonl", "batch", bytes)
+    .await?;
+
+let page = openai.files()
+    .list(ListFilesRequest::builder().purpose("batch").limit(20).build())
+    .await?;
+let meta = openai.files().retrieve(&file.id).await?;
+let content = openai.files().content(&file.id).await?; // Bytes
+openai.files().delete(&file.id).await?;
+```
+
+上传使用 `multipart/form-data`；`execute(HttpRequest)` 可绕过 typed 方法直接发任意文件接口。
+
+### 9.2 Batches
+
+```rust
+let batch = openai.batches().create(
+    CreateBatchRequest::builder()
+        .input_file_id(&file.id)
+        .endpoint("/v1/chat/completions")
+        .completion_window("24h")
+        .build()?,
+).await?;
+
+let page = openai.batches()
+    .list(ListBatchesRequest { limit: Some(20), after: None })
+    .await?;
+let current = openai.batches().retrieve(&batch.id).await?;
+openai.batches().cancel(&batch.id).await?;
+```
+
+结果文件通过 `batches().retrieve(&id)` 的 `output_file_id` / `error_file_id`，再用
+`files().content(...)` 下载。
+
+### 9.3 Embeddings
+
+```rust
+let response = openai.embeddings().create(
+    EmbeddingRequest::builder()
+        .model("text-embedding-3-small")
+        .input(vec!["hello".to_owned(), "world".to_owned()])
+        .dimensions(256)
+        .build()?,
+).await?;
+```
+
+### 9.4 Responses 生命周期与计 token
+
+```rust
+let responses = openai.responses();
+let current = responses.retrieve("resp_...").await?;
+responses.cancel("resp_...").await?;
+responses.delete("resp_...").await?;
+
+let items = responses
+    .input_items(ListInputItemsRequest::new("resp_..."))
+    .await?;
+
+let tokens = responses.input_tokens_count(
+    InputTokensCountRequest::builder()
+        .model("gpt-5")
+        .input_items(history)
+        .build()?,
+).await?;
+```
+
+## 10. 扩展点
+
+### 10.1 `extensions` 透传未知字段
 
 Chat 请求用 `.extension("logit_bias", serde_json::json!({"50256": -100}))` 透传未建模字段；
 Responses 同理（如 `.extension("store", json!(true))`）。只用于**未建模字段**；不要与同名
 typed 字段同时设置，否则序列化会出现重复键。
 
-### 9.2 自定义 Endpoint 与 Transport
+### 10.2 自定义 Endpoint 与 Transport
 
-当前 Provider 客户端**没有公开 raw execute**：`Chat` / `Responses` 只暴露 `create`、
-`create_with_meta`、`parse_as`、`stream`、`endpoint`、`with_options`。
-`ApiClient::execute` 虽是 public，但 `ApiClient::new` 是 crate-private，外部无法构造。
+`OpenAi` 暴露 raw execute，复用客户端的认证、重试、超时、压缩与 `RequestOptions`：
 
-扩展路径：
+```rust
+use airx_core::http::HttpRequest;
+
+let request = HttpRequest::get("https://api.openai.com/v1/models".parse()?);
+let response = openai.execute(request).await?;
+let raw = response.body;
+```
+
+需要自定义编码 / 解码时：
 
 1. **复用已编码请求**：`endpoint().encode(&request)?` 得到带认证 Header 的 `HttpRequest`，
-   交给自定义 `Transport`（或自己的 HTTP 客户端）执行，再用 `endpoint().decode(response)` 解码。
+   交给自定义 `Transport` 执行，再用 `endpoint().decode(response)` 解码。
 2. **自定义 `Endpoint`**：实现 `encode` / `decode`（流式再实现 `StreamingEndpoint`），
-   自行构造 URL、认证 Header 与 body；适合官方新增接口或完整 raw body。
+   自行构造 URL、认证 Header 与 body。
 
 ```rust
 use airx::{Endpoint, Transport}; // trait 需在作用域内
 
-let http = client.chat().endpoint().encode(&request)?;
-let response = my_transport.execute(http).await?; // 任意 Transport 实现
-let typed = client.chat().endpoint().decode(response)?;
+let http = openai.chat().endpoint().encode(&request)?;
+let response = my_transport.execute(http).await?;
+let typed = openai.chat().endpoint().decode(response)?;
 ```
 
-注意：`OpenAiConfig::apply_headers` 是 crate-private，外部自定义 Endpoint 无法直接复用，
-也无法从 `OpenAiConfig` 读取 API Key；需要自己持有 key 并写入 Header。长期方案是在
-`airx-protocol` 增加 typed endpoint，并在 `airx` 门面暴露对应入口。
+`OpenAiConfig::apply_headers` 仍是 crate-private；自定义 Endpoint 需要自己持有 key 并写入
+Header。长期方案是在 `airx-protocol` 增加 typed endpoint，并在 `airx` 门面暴露入口。
 
-### 9.3 OpenAI-Compatible 网关（DeepSeek 示例）
+### 10.3 OpenAI-Compatible 网关（DeepSeek 示例）
 
 DeepSeek 不是独立协议，只是 OpenAI-Compatible 部署：
 
@@ -463,13 +555,13 @@ let request = ChatCompletionRequest::builder()
 - 网关额外 Header（如 OpenCode Zen 的 `x-opencode-session`）用执行级
   `ClientBuilder::default_headers` 注入；网关未实现的字段 / 工具需真实调用验证。
 
-### 9.4 明确不提供 Agent / 工具循环
+### 10.4 明确不提供 Agent / 工具循环
 
 airx 不会轮询 `tool_calls`、不会执行函数、不会维护多轮会话，也不会自动把工具结果拼回
 下一次请求。上面的 `assistant_tool_calls` + `tool_result` 由调用方显式构造；循环、
 超时、并发与错误策略都属于应用层。
 
-## 10. 最佳实践 / 常见坑
+## 11. 最佳实践 / 常见坑
 
 - **`max_tokens` 已弃用**：新代码使用 `max_completion_tokens`（含推理 token）；o-series 与 `max_tokens` 不兼容。
 - **流式不重试**：429 / 5xx 在流式请求上直接返回错误。
@@ -480,7 +572,7 @@ airx 不会轮询 `tool_calls`、不会执行函数、不会维护多轮会话�
 - **`Option<T>` 无法区分 `null` 与缺省**：需要 null 保真时使用 `RawJson` 或保留原始响应体。
 - **`parse_as` 只做 serde**：schema / `response_format` / `text_format` 仍由调用方设置；空内容直接报 `Deserialization`。
 
-## 11. API 速查表
+## 12. API 速查表
 
 | 类型 / 方法 | 一句话 |
 | --- | --- |
@@ -488,12 +580,16 @@ airx 不会轮询 `tool_calls`、不会执行函数、不会维护多轮会话�
 | `.chat_path(...)` / `.responses_path(...)` | 构建时覆盖模式路径 |
 | `OpenAi::chat()` / `chat_at(path)?` | Chat 入口；`_at` 仅本次覆盖路径 |
 | `OpenAi::responses()` / `responses_at(path)?` | Responses 入口；`_at` 仅本次覆盖路径 |
-| `OpenAi::models()` | Models 入口 |
+| `OpenAi::models()` / `embeddings()` / `files()` / `batches()` | 模型 / 向量 / 文件 / 批处理入口 |
+| `OpenAi::execute(HttpRequest)` | 自定义接口逃生通道，复用客户端配置 |
 | `Chat::create / create_with_meta / parse_as::<T> / stream / with_options / endpoint` | Chat 全部 SDK 入口 |
-| `Responses::create / create_with_meta / parse_as::<T> / stream / with_options / endpoint` | Responses 全部 SDK 入口 |
+| `Responses::create / retrieve / cancel / delete / input_items / input_tokens_count` | Responses 生命周期与计 token |
 | `OpenAiModels::list()` / `retrieve(id)` | 模型列表（无分页）/ 单个模型 |
+| `OpenAiFiles::upload / list / retrieve / delete / content` | 文件上传、列表、下载 |
+| `OpenAiBatches::create / list / retrieve / cancel` | 批处理 |
+| `OpenAiEmbeddings::create` | 向量 |
 | `ChatCompletionRequest::builder()` / `ResponsesRequest::builder()` | 请求构建器；`build()` 校验必填字段 |
-| `RequestOptions::new().try_header(k, v)?.idempotency_key(k)` | 单次 Header / 幂等键 |
+| `RequestOptions::new().try_header(k, v)?.idempotency_key(k).timeout(d).retry_policy(p)` | 单次 Header / 幂等键 / 超时 / 重试 |
 | `WithMeta<T> { data, meta }` / `ResponseMeta` | 类型化数据 + HTTP 元数据（status / headers / request_id / raw_body） |
 | `ProtocolStream::next()` / `final_text()` / `final_response()` | 逐事件读取 / 一次性收尾 |
 | `ChatStreamAccumulator` / `ResponsesStreamAccumulator` | `apply` / `finish` / `snapshot` / `status` |

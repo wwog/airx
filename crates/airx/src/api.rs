@@ -38,6 +38,7 @@ impl<P> ApiClient<P> {
         &self.endpoint
     }
 
+    #[cfg(any(feature = "openai", feature = "anthropic"))]
     pub(crate) fn executor(&self) -> Arc<Executor> {
         Arc::clone(&self.executor)
     }
@@ -45,6 +46,15 @@ impl<P> ApiClient<P> {
     /// 直接发送预编码请求（逃生通道）。
     pub async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, AirxError> {
         self.executor.execute(request).await
+    }
+
+    /// 直接发送预编码请求，并应用单次请求选项。
+    pub async fn execute_with(
+        &self,
+        request: HttpRequest,
+        options: &RequestOptions,
+    ) -> Result<HttpResponse, AirxError> {
+        self.executor.execute_with(request, options).await
     }
 }
 

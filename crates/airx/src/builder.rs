@@ -118,12 +118,16 @@ impl ClientBuilder {
 
     /// 把执行配置固化为共享的 [`Executor`]。
     pub(crate) fn build_executor(self) -> Result<Arc<Executor>, AirxError> {
+        let retry_policy = self.retry_policy;
         let transport = match self.transport {
             Some(transport) => transport,
             None => default_transport(self.timeout, self.connect_timeout)?,
         };
-        let transport = apply_retry(transport, self.retry_policy)?;
-        Ok(Arc::new(Executor::new(transport, self.default_headers)))
+        Ok(Arc::new(Executor::new(
+            transport,
+            self.default_headers,
+            retry_policy,
+        )))
     }
 }
 
@@ -161,33 +165,6 @@ fn default_transport(
     Err(AirxError::Configuration(ConfigurationError::new(
         "未提供 Transport，且当前未启用 native / wasm feature",
     )))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn apply_retry(
-    transport: Arc<dyn Transport>,
-    policy: RetryPolicy,
-) -> Result<Arc<dyn Transport>, AirxError> {
-    if policy.is_enabled() {
-        Ok(Arc::new(airx_transport::RetryTransport::new(
-            transport, policy,
-        )))
-    } else {
-        Ok(transport)
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn apply_retry(
-    transport: Arc<dyn Transport>,
-    policy: RetryPolicy,
-) -> Result<Arc<dyn Transport>, AirxError> {
-    if policy.is_enabled() {
-        return Err(AirxError::Configuration(ConfigurationError::new(
-            "WASM 目标暂不支持自动重试",
-        )));
-    }
-    Ok(transport)
 }
 
 /// OpenAI Provider 构建器。

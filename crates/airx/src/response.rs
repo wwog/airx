@@ -6,7 +6,9 @@
 use airx_core::AirxError;
 use airx_core::error::DeserializationError;
 use airx_core::http::{HeaderMap, HttpResponse, StatusCode};
-use airx_transport::{HttpStreamResponse, extract_request_id};
+#[cfg(feature = "stream")]
+use airx_transport::HttpStreamResponse;
+use airx_transport::extract_request_id;
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 
@@ -45,6 +47,7 @@ pub struct StreamMeta {
     pub request_id: Option<String>,
 }
 
+#[cfg(feature = "stream")]
 impl StreamMeta {
     pub(crate) fn from_response(response: &HttpStreamResponse) -> Self {
         Self {

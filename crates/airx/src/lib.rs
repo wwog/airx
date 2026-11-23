@@ -17,6 +17,8 @@ mod client;
 mod executor;
 #[cfg(feature = "gemini")]
 mod gemini;
+#[cfg(any(feature = "openai", feature = "anthropic"))]
+mod multipart;
 #[cfg(feature = "openai")]
 mod openai;
 mod options;
@@ -30,7 +32,7 @@ pub use airx_protocol::{Endpoint, StreamingEndpoint};
 pub use airx_transport::{RetryPolicy, Transport};
 
 #[cfg(feature = "anthropic")]
-pub use anthropic::{Anthropic, AnthropicModels, Messages};
+pub use anthropic::{Anthropic, AnthropicBatches, AnthropicFiles, AnthropicModels, Messages};
 pub use api::ApiClient;
 #[cfg(feature = "anthropic")]
 pub use builder::AnthropicBuilder;
@@ -41,9 +43,11 @@ pub use builder::GeminiBuilder;
 pub use builder::OpenAiBuilder;
 pub use client::Client;
 #[cfg(feature = "gemini")]
-pub use gemini::{Gemini, GeminiModels, GenerateContent};
+pub use gemini::{Gemini, GeminiEmbeddings, GeminiModels, GenerateContent};
 #[cfg(feature = "openai")]
-pub use openai::{Chat, OpenAi, OpenAiModels, Responses};
+pub use openai::{
+    Chat, OpenAi, OpenAiBatches, OpenAiEmbeddings, OpenAiFiles, OpenAiModels, Responses,
+};
 #[cfg(any(feature = "openai", feature = "anthropic", feature = "gemini"))]
 pub use options::RequestOptions;
 #[cfg(any(feature = "openai", feature = "anthropic", feature = "gemini"))]

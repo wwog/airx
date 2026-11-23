@@ -90,6 +90,13 @@ impl GenerateContentRequestBuilder {
         self
     }
 
+    /// 一次性设置完整内容列表（适合 Agent 循环复用历史）。
+    #[must_use]
+    pub fn contents(mut self, contents: impl IntoIterator<Item = Content>) -> Self {
+        self.contents.extend(contents);
+        self
+    }
+
     /// 追加用户文本。
     #[must_use]
     pub fn user(self, text: impl Into<String>) -> Self {

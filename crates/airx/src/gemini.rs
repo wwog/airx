@@ -6,8 +6,13 @@
 use std::sync::Arc;
 
 use airx_core::AirxError;
+use airx_core::http::{HttpRequest, HttpResponse};
 use airx_core::model::ModelId;
 use airx_protocol::gemini::GeminiConfig;
+use airx_protocol::gemini::embeddings::{
+    BatchEmbedContentsEndpoint, BatchEmbedContentsRequest, BatchEmbedContentsResponse,
+    BatchEmbedItem, EmbedContentEndpoint, EmbedContentRequest, EmbedContentResponse,
+};
 use airx_protocol::gemini::generate_content::{
     CountTokensEndpoint, CountTokensRequest, CountTokensResponse, GenerateContentEndpoint,
     GenerateContentRequest, GenerateContentResponse,
@@ -41,6 +46,20 @@ impl Gemini {
         &self.config
     }
 
+    /// 直接执行预编码请求，复用客户端的认证、Header、超时与重试。
+    pub async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, AirxError> {
+        self.executor.execute(request).await
+    }
+
+    /// 与 [`Gemini::execute`] 相同，并应用单次请求选项。
+    pub async fn execute_with(
+        &self,
+        request: HttpRequest,
+        options: &RequestOptions,
+    ) -> Result<HttpResponse, AirxError> {
+        self.executor.execute_with(request, options).await
+    }
+
     /// 指定模型，进入 `generateContent` 调用。
     pub fn generate_content(&self, model: impl Into<ModelId>) -> GenerateContent {
         GenerateContent {
@@ -56,6 +75,16 @@ impl Gemini {
         GeminiModels {
             executor: Arc::clone(&self.executor),
             config: self.config.clone(),
+            options: RequestOptions::default(),
+        }
+    }
+
+    /// Embeddings API（模型在路径中）。
+    pub fn embed_content(&self, model: impl Into<ModelId>) -> GeminiEmbeddings {
+        GeminiEmbeddings {
+            executor: Arc::clone(&self.executor),
+            config: self.config.clone(),
+            model: model.into(),
             options: RequestOptions::default(),
         }
     }
@@ -203,5 +232,55 @@ impl GeminiModels {
         }
 
         Ok(all)
+    }
+}
+
+/// Gemini Embeddings 调用入口。
+#[derive(Clone)]
+pub struct GeminiEmbeddings {
+    executor: Arc<Executor>,
+    config: GeminiConfig,
+    model: ModelId,
+    options: RequestOptions,
+}
+
+impl GeminiEmbeddings {
+    /// 设置本次调用的请求选项。
+    #[must_use]
+    pub fn with_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// 单条嵌入。
+    pub async fn create(
+        &self,
+        request: EmbedContentRequest,
+    ) -> Result<EmbedContentResponse, AirxError> {
+        let api = ApiClient::new(
+            EmbedContentEndpoint::new(self.config.clone(), self.model.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 批量嵌入；每条请求自动带上当前模型。
+    pub async fn batch(
+        &self,
+        requests: impl IntoIterator<Item = EmbedContentRequest>,
+    ) -> Result<BatchEmbedContentsResponse, AirxError> {
+        let mut items = Vec::new();
+        for request in requests {
+            items.push(BatchEmbedItem::from_request(request, &self.model)?);
+        }
+        let request = BatchEmbedContentsRequest {
+            requests: items,
+            extensions: airx_core::json::Extensions::new(),
+        };
+        let api = ApiClient::new(
+            BatchEmbedContentsEndpoint::new(self.config.clone(), self.model.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
     }
 }

@@ -376,6 +376,13 @@ impl MessagesRequestBuilder {
         self
     }
 
+    /// 一次性设置完整消息列表（适合 Agent 循环复用历史）。
+    #[must_use]
+    pub fn messages(mut self, messages: impl IntoIterator<Item = Message>) -> Self {
+        self.messages.extend(messages);
+        self
+    }
+
     /// 追加用户文本消息。
     #[must_use]
     pub fn user(self, content: impl Into<String>) -> Self {

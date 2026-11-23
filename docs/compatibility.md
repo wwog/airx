@@ -127,8 +127,8 @@ Anthropic-Compatible 部署请使用 Anthropic Native API。`thinking` /
 - **安全拦截**：HTTP 200 + `promptFeedback.blockReason` 是正常响应，不是错误；
   调用方应检查 `prompt_feedback` 与 `finish_reason`。
 - **未知结构**：未知 `Part` / 字段保留为 `Part::Other` 或 `extensions`，重新序列化不丢失。
-- **未封装**：`countTokens`、模型列表、Vertex AI 专属参数（可用 `extensions` 或原生
-  `Endpoint` 逃生通道）。
+- **未封装**：Gemini Files、Batches、Vertex AI 专属参数、Live API（可用 `extensions`、
+  `execute(HttpRequest)` 或原生 `Endpoint` 逃生通道）。
 
 ## 7. 服务端联网工具
 
@@ -167,11 +167,13 @@ Anthropic-Compatible 部署请使用 Anthropic Native API。`thinking` /
 在不引入统一请求模型的前提下，门面提供与官方 SDK 对齐的便利能力：
 
 ```rust
-// 单次请求选项
+// 单次请求选项（Header / 幂等键 / timeout / retry 覆盖）
 let chat = client.chat().with_options(
     RequestOptions::new()
         .try_header("x-trace-id", "trace-1")?
-        .idempotency_key("idem-1"),
+        .idempotency_key("idem-1")
+        .timeout(Duration::from_secs(30))
+        .retry_policy(RetryPolicy::disabled()),
 );
 
 // 响应元数据（status / headers / request id / raw body）
@@ -191,4 +193,9 @@ while let Some(event) = stream.try_next().await? { /* ... */ }
 - 各协议提供 `final_response()` / `final_text()`，内部驱动对应 Accumulator。
 - 模型列表：`client.models().list() / retrieve()`；Anthropic / Gemini 支持 `list_all()`。
 - 计 token：Anthropic `messages().count_tokens()`、Gemini `generate_content(m).count_tokens()`。
+- 文件 / 批处理 / Embeddings：OpenAI `files/batches/embeddings`、Anthropic `files/batches`、
+  Gemini `embed_content`；上传使用 multipart。
+- 完整历史输入：Chat / Messages 的 `.messages(...)`、Gemini `.contents(...)`、
+  Responses `.input_items(...)`。
+- raw execute：`OpenAi/Anthropic/Gemini::execute(HttpRequest)` 复用认证、重试、超时与压缩。
 - `parse_as<T>` 只负责 serde 解析；schema 仍由调用方通过各协议字段设置。

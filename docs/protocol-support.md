@@ -33,15 +33,16 @@
 | 能力 | 状态 |
 | --- | --- |
 | 请求：model / input（文本或 item）/ instructions / max_output_tokens / temperature / top_p | 已实现 |
-| 请求：`reasoning.effort` | 已实现 |
-| 请求：`text.format`（text / json_object / json_schema） | 已实现 |
+| 请求：`reasoning.effort` / `reasoning.summary` / `text.format` / `text.verbosity` | 已实现 |
+| 请求：`previous_response_id` / `store` / `background` / `include` / `truncation` / `conversation` / `metadata` / `service_tier` / `prompt_cache_key` / `safety_identifier` / `max_tool_calls` | 已实现 |
 | 请求：tools / tool_choice / parallel_tool_calls | 已实现 |
-| 输入 item：message / function_call_output | 已实现 |
-| 输出 item：message（output_text / refusal）/ function_call | 已实现 |
+| 输入 item：message（文本或多模态）/ function_call / function_call_output / reasoning / item_reference | 已实现；未知保留 |
+| 输出 item：message（output_text / refusal）/ function_call / reasoning / web_search_call / file_search_call / code_interpreter_call / image_generation_call / mcp_call | 已实现；其余保留 |
 | 未知 item / content / 事件 | `Other(Value)` / `Unknown(Value)` 原样保留 |
-| 流式事件：created / output_item.added·done / output_text.delta·done / function_call_arguments.delta·done / completed / failed / incomplete / error | 已实现 |
+| 流式事件：created / in_progress / content_part.added·done / output_item.added·done / output_text.delta·done / refusal.delta·done / reasoning_summary_text.delta·done / function_call_arguments.delta·done / 服务端工具生命周期（`ServerToolCall`） / completed / failed / incomplete / error | 已实现 |
 | 流式未知事件 | `Unknown(Value)` |
-| 聚合：`ResponsesStreamAccumulator`（无 completed 报 Incomplete，failed 报 Failed） | 已实现 |
+| 聚合：`ResponsesStreamAccumulator`（文本 / 工具参数 / reasoning 摘要 / refusal；无 completed 报 Incomplete） | 已实现 |
+| 生命周期：retrieve / cancel / delete / input_items / input_tokens | 已实现 |
 
 ## Anthropic Messages
 
@@ -96,6 +97,17 @@ Gemini 流没有 `[DONE]` 哨兵。`finish()` 只有在收到候选的 `finishRe
 认证使用 `x-goog-api-key`（不把 key 放进 URL）；默认基地址
 `https://generativelanguage.googleapis.com/v1beta`。模型可写 `gemini-2.5-flash`、
 `models/gemini-2.5-flash`、`tunedModels/...`，端点会规范化路径。
+
+## Files / Batches / Embeddings
+
+| Provider | Files | Batches | Embeddings |
+| --- | --- | --- | --- |
+| OpenAI | `POST/GET/DELETE /files`、`GET /files/{id}/content` | `POST/GET /batches`、`POST /batches/{id}/cancel` | `POST /embeddings` |
+| Anthropic | `POST/GET/DELETE /v1/files`、`GET /v1/files/{id}/content` | `{messages_path}/batches`（含 cancel / results） | — |
+| Gemini | — | — | `POST /models/{model}:embedContent`、`:batchEmbedContents` |
+
+上传使用 `multipart/form-data`；未知字段通过 `extensions` 保留。Gemini Files / Batches
+尚未封装，可用 `execute(HttpRequest)` 或原生 `Endpoint` 扩展。
 
 ## 模型列表
 
