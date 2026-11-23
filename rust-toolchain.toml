@@ -1,0 +1,4 @@
+[toolchain]
+# 仅固定通道；wasm32 等 target 由本地或 CI 显式安装（rustup target add），
+# 不在本文件声明，避免 rustup 在项目目录内隐式同步整条通道。
+channel = "stable"

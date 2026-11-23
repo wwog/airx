@@ -1,0 +1,43 @@
+[package]
+name = "airx-transport"
+description = "airx 传输层：HTTP 执行、流式读取、超时取消、重试与中间件"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# native 后端默认启用；airx 门面以 default-features = false 引入本 crate
+default = ["native", "rustls-tls"]
+native = ["dep:reqwest"]
+rustls-tls = ["reqwest?/rustls"]
+native-tls = ["reqwest?/native-tls"]
+wasm = [
+    "dep:gloo-net",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+]
+# 占位 feature：模块落地后按需启用
+stream = []
+
+[dependencies]
+airx-core = { path = "../airx-core", default-features = false }
+bytes.workspace = true
+http.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-net = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }

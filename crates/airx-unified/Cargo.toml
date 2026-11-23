@@ -1,0 +1,19 @@
+[package]
+name = "airx-unified"
+description = "airx 统一层：跨 Provider 的统一模型、能力判定与纯函数 Adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+airx-core = { path = "../airx-core", default-features = false }
+airx-protocol = { path = "../airx-protocol", default-features = false }
+serde.workspace = true
+serde_json.workspace = true

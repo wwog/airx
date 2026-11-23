@@ -1,0 +1,36 @@
+[package]
+name = "airx"
+description = "airx 门面：Client / Builder / typed endpoint / prelude"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["native", "rustls-tls", "openai", "stream"]
+
+# 平台后端
+native = ["airx-transport/native"]
+rustls-tls = ["airx-transport/rustls-tls"]
+native-tls = ["airx-transport/native-tls"]
+wasm = ["airx-transport/wasm"]
+
+# Provider
+openai = ["airx-protocol/openai"]
+anthropic = ["airx-protocol/anthropic"]
+deepseek = ["airx-protocol/deepseek"]
+all-providers = ["openai", "anthropic", "deepseek"]
+
+# 能力
+stream = ["airx-core/stream", "airx-protocol/stream", "airx-transport/stream"]
+json = ["airx-core/json"]
+unified = ["dep:airx-unified"]
+
+[dependencies]
+airx-core = { path = "../airx-core", default-features = false }
+airx-protocol = { path = "../airx-protocol", default-features = false }
+airx-transport = { path = "../airx-transport", default-features = false }
+airx-unified = { path = "../airx-unified", optional = true }

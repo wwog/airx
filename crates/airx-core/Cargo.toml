@@ -1,0 +1,25 @@
+[package]
+name = "airx-core"
+description = "airx 基础层：错误分类、模型标识、JSON 保真、SSE 语法与 HTTP 数据结构"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# 占位 feature：模块落地后按需启用（见 docs/architecture.md §8.3）
+default = []
+stream = []
+json = []
+tracing = ["dep:tracing"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+http.workspace = true
+thiserror.workspace = true
+tracing = { workspace = true, optional = true }

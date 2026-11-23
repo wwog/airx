@@ -1,0 +1,24 @@
+[package]
+name = "airx-protocol"
+description = "airx 原生协议层：OpenAI / Anthropic / DeepSeek 的强类型模型与纯编解码"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# 占位 feature：模块落地后按需启用（见 docs/architecture.md §8.3）
+default = []
+openai = []
+anthropic = []
+deepseek = []
+stream = []
+
+[dependencies]
+airx-core = { path = "../airx-core", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
