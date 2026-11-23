@@ -21,6 +21,14 @@
 当前实现架构见 [docs/architecture.md](docs/architecture.md)，协议覆盖见
 [docs/protocol-support.md](docs/protocol-support.md)，兼容规则见 [docs/compatibility.md](docs/compatibility.md)。
 
+协议接入指南：
+
+| 协议 | 快速接入 / 详细使用 / 扩展 |
+| --- | --- |
+| OpenAI Chat + Responses | [docs/openai.md](docs/openai.md) |
+| Anthropic Messages | [docs/anthropic.md](docs/anthropic.md) |
+| Gemini generateContent | [docs/gemini.md](docs/gemini.md) |
+
 ## 快速开始
 
 ```toml
