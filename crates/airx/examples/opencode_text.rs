@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .max_completion_tokens(2048)
             .build()?;
 
-        let response = client.openai()?.chat().create(request).await?;
+        let response = client.chat().create(request).await?;
         let text = response.first_content().unwrap_or_default();
         let reasoning = common::reasoning_of(&response);
         let usage = response.usage.as_ref();

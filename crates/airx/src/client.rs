@@ -1,82 +1,62 @@
-//! Client 门面。
-
-use std::sync::Arc;
-
-#[cfg(any(feature = "openai", feature = "anthropic", feature = "gemini"))]
-use airx_core::AirxError;
-#[cfg(any(feature = "openai", feature = "anthropic", feature = "gemini"))]
-use airx_core::error::ConfigurationError;
-use airx_core::http::HeaderMap;
-#[cfg(feature = "anthropic")]
-use airx_protocol::anthropic::AnthropicConfig;
-#[cfg(feature = "gemini")]
-use airx_protocol::gemini::GeminiConfig;
-#[cfg(feature = "openai")]
-use airx_protocol::openai::OpenAiConfig;
+//! Client 构建入口。
+//!
+//! 构建结果就是**具体协议的客户端**（`OpenAi` / `Anthropic` / `Gemini`），
+//! 创建后即可复用：后续请求不再需要选择 Provider，也不再出现
+//! `client.anthropic()?.messages()` 这类重复入口。
 
 #[cfg(feature = "anthropic")]
-use crate::anthropic::Anthropic;
+use crate::builder::AnthropicBuilder;
 use crate::builder::ClientBuilder;
-use crate::executor::Executor;
 #[cfg(feature = "gemini")]
-use crate::gemini::Gemini;
+use crate::builder::GeminiBuilder;
 #[cfg(feature = "openai")]
-use crate::openai::OpenAi;
+use crate::builder::OpenAiBuilder;
 
-/// 持有执行配置与各 Provider 配置的客户端。
+/// 入口命名空间。
+///
+/// 三个快捷入口直接进入对应 Provider 的配置：
+///
+/// ```ignore
+/// let anthropic = Client::anthropic().api_key("...").build()?;
+/// let openai = Client::openai().api_key("...").build()?;
+/// let gemini = Client::gemini().api_key("...").build()?;
+/// ```
+///
+/// 需要先配置 Transport / 超时 / 重试 / Header 时使用 [`Client::builder`]：
+///
+/// ```ignore
+/// let client = Client::builder()
+///     .transport(mock)
+///     .timeout(Duration::from_secs(60))
+///     .anthropic()
+///     .api_key("...")
+///     .build()?;
+/// ```
 pub struct Client {
-    pub(crate) executor: Arc<Executor>,
-    #[cfg(feature = "anthropic")]
-    pub(crate) anthropic: Option<AnthropicConfig>,
-    #[cfg(feature = "gemini")]
-    pub(crate) gemini: Option<GeminiConfig>,
-    #[cfg(feature = "openai")]
-    pub(crate) openai: Option<OpenAiConfig>,
+    _private: (),
 }
 
 impl Client {
-    /// 创建构建器。
+    /// 通用构建器（先配置执行级选项，再进入 Provider）。
     pub fn builder() -> ClientBuilder {
         ClientBuilder::new()
     }
 
-    /// 进入 OpenAI Provider。
-    ///
-    /// 返回 `Result`：Client 可能未被配置为该 Provider。
+    /// 直接进入 OpenAI 配置。
     #[cfg(feature = "openai")]
-    pub fn openai(&self) -> Result<OpenAi<'_>, AirxError> {
-        let config = self.openai.as_ref().ok_or_else(|| {
-            AirxError::Configuration(ConfigurationError::new(
-                "该 Client 未配置 OpenAI Provider，请使用 Client::builder().openai()",
-            ))
-        })?;
-        Ok(OpenAi::new(self, config))
+    pub fn openai() -> OpenAiBuilder {
+        ClientBuilder::new().openai()
     }
 
-    /// 进入 Anthropic Provider。
+    /// 直接进入 Anthropic 配置。
     #[cfg(feature = "anthropic")]
-    pub fn anthropic(&self) -> Result<Anthropic<'_>, AirxError> {
-        let config = self.anthropic.as_ref().ok_or_else(|| {
-            AirxError::Configuration(ConfigurationError::new(
-                "该 Client 未配置 Anthropic Provider，请使用 Client::builder().anthropic()",
-            ))
-        })?;
-        Ok(Anthropic::new(self, config))
+    pub fn anthropic() -> AnthropicBuilder {
+        ClientBuilder::new().anthropic()
     }
 
-    /// 进入 Gemini Provider。
+    /// 直接进入 Gemini 配置。
     #[cfg(feature = "gemini")]
-    pub fn gemini(&self) -> Result<Gemini<'_>, AirxError> {
-        let config = self.gemini.as_ref().ok_or_else(|| {
-            AirxError::Configuration(ConfigurationError::new(
-                "该 Client 未配置 Gemini Provider，请使用 Client::builder().gemini()",
-            ))
-        })?;
-        Ok(Gemini::new(self, config))
-    }
-
-    /// 执行级默认 Header。
-    pub fn default_headers(&self) -> &HeaderMap {
-        self.executor.default_headers()
+    pub fn gemini() -> GeminiBuilder {
+        ClientBuilder::new().gemini()
     }
 }

@@ -13,14 +13,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("GEMINI_API_KEY")?;
     let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_owned());
 
-    let client = Client::builder().gemini().api_key(api_key).build()?;
+    let client = Client::gemini().api_key(api_key).build()?;
 
     let request = GenerateContentRequest::builder()
         .user("用三句话解释 Rust 的所有权。")
         .build()?;
 
     let mut stream = client
-        .gemini()?
         .generate_content(model.as_str())
         .stream(request)
         .await?;

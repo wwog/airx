@@ -26,7 +26,7 @@ const SUCCESS: &str = r#"{
   "usage": { "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7 }
 }"#;
 
-fn client(mock: &MockTransport) -> Client {
+fn client(mock: &MockTransport) -> OpenAi {
     Client::builder()
         .transport(mock.clone())
         .openai()
@@ -50,8 +50,6 @@ async fn chat_create_runs_the_full_pipeline() {
     mock.push_json(200, SUCCESS);
 
     let response = client(&mock)
-        .openai()
-        .expect("openai")
         .chat()
         .create(request())
         .await
@@ -93,8 +91,6 @@ async fn provider_error_surfaces_with_status_and_code() {
     );
 
     let error = client(&mock)
-        .openai()
-        .expect("openai")
         .chat()
         .create(request())
         .await
@@ -130,13 +126,7 @@ async fn execution_headers_do_not_override_protocol_headers() {
         .build()
         .expect("client");
 
-    client
-        .openai()
-        .expect("openai")
-        .chat()
-        .create(request())
-        .await
-        .expect("response");
+    client.chat().create(request()).await.expect("response");
 
     let sent = &mock.requests()[0];
     assert_eq!(sent.headers["x-execution"], "1");
@@ -152,8 +142,6 @@ async fn retry_is_disabled_by_default() {
     mock.push_json(500, "{}");
 
     let error = client(&mock)
-        .openai()
-        .expect("openai")
         .chat()
         .create(request())
         .await
@@ -181,13 +169,7 @@ async fn retry_policy_retries_rate_limits_for_post() {
         .build()
         .expect("client");
 
-    let response = client
-        .openai()
-        .expect("openai")
-        .chat()
-        .create(request())
-        .await
-        .expect("response");
+    let response = client.chat().create(request()).await.expect("response");
 
     assert_eq!(response.first_content(), Some("你好!"));
     assert_eq!(mock.request_count(), 2);
@@ -206,13 +188,7 @@ async fn base_url_override_is_used_for_the_request() {
         .build()
         .expect("client");
 
-    client
-        .openai()
-        .expect("openai")
-        .chat()
-        .create(request())
-        .await
-        .expect("response");
+    client.chat().create(request()).await.expect("response");
 
     assert_eq!(
         mock.requests()[0].uri.to_string(),
@@ -220,14 +196,14 @@ async fn base_url_override_is_used_for_the_request() {
     );
 }
 
-#[tokio::test]
-async fn openai_accessor_requires_provider_configuration() {
-    let client = Client::builder()
+#[test]
+fn missing_api_key_is_a_configuration_error() {
+    let result = Client::builder()
         .transport(MockTransport::new())
-        .build()
-        .expect("client");
+        .openai()
+        .build();
 
-    assert!(client.openai().is_err());
+    assert!(matches!(result, Err(AirxError::Configuration(_))));
 }
 
 #[tokio::test]
@@ -243,8 +219,6 @@ async fn extensions_are_sent_through_to_the_wire_body() {
         .expect("request");
 
     client(&mock)
-        .openai()
-        .expect("openai")
         .chat()
         .create(request)
         .await

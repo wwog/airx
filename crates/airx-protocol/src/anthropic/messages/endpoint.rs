@@ -15,8 +15,8 @@ use super::event::MessagesEvent;
 use super::request::MessagesRequest;
 use super::response::MessagesResponse;
 
-/// 端点路径。
-pub const MESSAGES_PATH: &str = "/v1/messages";
+/// 默认端点路径（可通过 [`AnthropicConfig::with_messages_path`] 覆盖）。
+pub const MESSAGES_PATH: &str = crate::anthropic::config::DEFAULT_MESSAGES_PATH;
 
 /// Messages 端点。
 #[derive(Debug, Clone)]
@@ -36,16 +36,7 @@ impl MessagesEndpoint {
     }
 
     fn uri(&self) -> Result<Uri, AirxError> {
-        let url = format!(
-            "{}{}",
-            self.config.base_url().trim_end_matches('/'),
-            MESSAGES_PATH
-        );
-        url.parse().map_err(|error| {
-            AirxError::Configuration(ConfigurationError::new(format!(
-                "无法构造 Messages URL: {error}"
-            )))
-        })
+        self.config.endpoint_uri()
     }
 }
 

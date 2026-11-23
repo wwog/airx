@@ -21,10 +21,6 @@ impl Executor {
         }
     }
 
-    pub(crate) fn default_headers(&self) -> &HeaderMap {
-        &self.default_headers
-    }
-
     pub(crate) async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, AirxError> {
         let request = self.apply_headers(request);
         Ok(self.transport.execute(request).await?)

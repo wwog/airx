@@ -17,6 +17,7 @@ use crate::executor::Executor;
 use crate::stream::{ProtocolStream, collect_body};
 
 /// 绑定一个协议端点与执行器。
+#[derive(Clone)]
 pub struct ApiClient<P> {
     endpoint: P,
     executor: Arc<Executor>,

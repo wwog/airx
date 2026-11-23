@@ -1,4 +1,7 @@
-//! OpenAI Provider 入口。
+//! OpenAI 客户端。
+//!
+//! 由 `Client::openai()` / `Client::builder().openai()` 构建，持有执行器与配置，
+//! 可以复用发起任意多次请求。
 
 use std::sync::Arc;
 
@@ -10,48 +13,72 @@ use airx_protocol::openai::chat::{
 use airx_protocol::openai::responses::{ResponsesEndpoint, ResponsesRequest, ResponsesResponse};
 
 use crate::api::ApiClient;
-use crate::client::Client;
+use crate::executor::Executor;
 #[cfg(feature = "stream")]
 use crate::stream::ProtocolStream;
 
-/// OpenAI Provider 视图。
-pub struct OpenAi<'a> {
-    client: &'a Client,
-    config: &'a OpenAiConfig,
+/// 已定性的 OpenAI 客户端。
+#[derive(Clone)]
+pub struct OpenAi {
+    executor: Arc<Executor>,
+    config: OpenAiConfig,
 }
 
-impl<'a> OpenAi<'a> {
-    pub(crate) fn new(client: &'a Client, config: &'a OpenAiConfig) -> Self {
-        Self { client, config }
+impl OpenAi {
+    pub(crate) fn new(executor: Arc<Executor>, config: OpenAiConfig) -> Self {
+        Self { executor, config }
     }
 
     /// Provider 配置。
     pub fn config(&self) -> &OpenAiConfig {
-        self.config
+        &self.config
     }
 
-    /// Chat Completions API。
+    /// Chat Completions API（使用构建时的路径配置）。
     pub fn chat(&self) -> Chat {
+        self.chat_with(&self.config)
+    }
+
+    /// Chat Completions API，本次调用临时覆盖路径。
+    ///
+    /// 路径可以是相对路径（拼接到 `base_url`）或完整 URL。
+    pub fn chat_at(&self, path: impl AsRef<str>) -> Result<Chat, AirxError> {
+        let config = self.config.clone().with_chat_path(path)?;
+        Ok(self.chat_with(&config))
+    }
+
+    /// Responses API（使用构建时的路径配置）。
+    pub fn responses(&self) -> Responses {
+        self.responses_with(&self.config)
+    }
+
+    /// Responses API，本次调用临时覆盖路径。
+    pub fn responses_at(&self, path: impl AsRef<str>) -> Result<Responses, AirxError> {
+        let config = self.config.clone().with_responses_path(path)?;
+        Ok(self.responses_with(&config))
+    }
+
+    fn chat_with(&self, config: &OpenAiConfig) -> Chat {
         Chat {
             api: ApiClient::new(
-                ChatEndpoint::new(self.config.clone()),
-                Arc::clone(&self.client.executor),
+                ChatEndpoint::new(config.clone()),
+                Arc::clone(&self.executor),
             ),
         }
     }
 
-    /// Responses API。
-    pub fn responses(&self) -> Responses {
+    fn responses_with(&self, config: &OpenAiConfig) -> Responses {
         Responses {
             api: ApiClient::new(
-                ResponsesEndpoint::new(self.config.clone()),
-                Arc::clone(&self.client.executor),
+                ResponsesEndpoint::new(config.clone()),
+                Arc::clone(&self.executor),
             ),
         }
     }
 }
 
 /// Chat Completions 调用入口。
+#[derive(Clone)]
 pub struct Chat {
     api: ApiClient<ChatEndpoint>,
 }
@@ -89,6 +116,7 @@ impl Chat {
 }
 
 /// Responses 调用入口。
+#[derive(Clone)]
 pub struct Responses {
     api: ApiClient<ResponsesEndpoint>,
 }

@@ -15,7 +15,7 @@
 | `airx-core` | 错误、模型标识、JSON 保真、SSE、增量 JSON、HTTP 数据结构 |
 | `airx-protocol` | OpenAI / Anthropic / Gemini 强类型模型与纯编解码（DeepSeek 走兼容端点） |
 | `airx-transport` | HTTP、流式读取、超时取消、幂等感知重试、同步中间件、Mock |
-| `airx` | Client / Builder / typed endpoint / prelude |
+| `airx` | Client 构建入口 / Provider 客户端 / typed endpoint / prelude |
 
 依赖严格单向：`airx → {core, protocol, transport}`，`protocol/transport → core`。
 完整设计与决策见 [docs/architecture.md](docs/architecture.md)，协议覆盖见
@@ -31,11 +31,11 @@ airx = "0.1"
 ```rust,ignore
 use airx::prelude::*;
 
-let client = Client::builder().openai().api_key("sk-...").build()?;
+// build() 直接得到已定性的 OpenAI 客户端，可复用
+let client = Client::openai().api_key("sk-...").build()?;
 
 // Native API（Chat）
 let response = client
-    .openai()?
     .chat()
     .create(
         ChatCompletionRequest::builder()
@@ -48,7 +48,6 @@ let response = client
 
 // 流式（累积为完整响应）
 let mut stream = client
-    .openai()?
     .chat()
     .stream(
         ChatCompletionRequest::builder().model("gpt-4o-mini").user("Hello").build()?,
@@ -64,9 +63,8 @@ let streamed = accumulator.finish()?;
 
 ```rust,ignore
 // Gemini：模型是路径的一部分，进入 API 时指定
-let client = Client::builder().gemini().api_key("...").build()?;
-let response = client
-    .gemini()?
+let gemini = Client::gemini().api_key("...").build()?;
+let response = gemini
     .generate_content("gemini-2.5-flash")
     .create(
         GenerateContentRequest::builder()
@@ -82,18 +80,36 @@ println!("{}", response.text());
 
 ## Feature
 
-| Feature | 内容 |
-| --- | --- |
-| `native` | Reqwest 传输 |
-| `rustls-tls` / `native-tls` | TLS 后端（默认 rustls） |
-| `wasm` | 浏览器 Fetch 传输（含 ReadableStream 流式） |
-| `openai` | OpenAI Chat + Responses |
-| `anthropic` | Anthropic Messages |
-| `gemini` | Gemini `generateContent` + `streamGenerateContent` |
-| `stream` | 流式 API（`ProtocolStream`、事件、Accumulator） |
-| `all-providers` | 全部 Provider |
+默认启用 `native + rustls-tls + all-providers + stream`，即三协议开箱即用。
 
-默认：`native + rustls-tls + openai + stream`。
+| Feature | 功能 | 默认 |
+| --- | --- | --- |
+| `native` | Reqwest 原生 HTTP 传输（连接池、超时、TLS） | ✅ |
+| `rustls-tls` | Reqwest 使用 rustls TLS 后端 | ✅ |
+| `native-tls` | Reqwest 使用系统 native-tls；与 `rustls-tls` 二选一 | — |
+| `wasm` | 浏览器 Fetch 传输（含 `ReadableStream` 流式；用于 wasm32） | — |
+| `all-providers` | 启用全部协议：`openai` + `anthropic` + `gemini` | ✅ |
+| `openai` | OpenAI Chat Completions + Responses | ✅（经 `all-providers`） |
+| `anthropic` | Anthropic Messages | ✅（经 `all-providers`） |
+| `gemini` | Gemini `generateContent` + `streamGenerateContent` | ✅（经 `all-providers`） |
+| `stream` | 流式 API：`ProtocolStream`、各协议事件、Accumulator | ✅ |
+| `json` | 预留的 JSON 工具开关（`JsonMode` / `RawJson` 当前始终可用） | — |
+
+按需裁剪（只保留 OpenAI + 流式）：
+
+```toml
+[dependencies]
+airx = { version = "0.1", default-features = false, features = ["native", "rustls-tls", "openai", "stream"] }
+```
+
+WASM：
+
+```toml
+[dependencies]
+airx = { version = "0.1", default-features = false, features = ["wasm", "all-providers", "stream"] }
+```
+
+TLS 后端只选一个；`native` 与 `wasm` 按目标平台选择。
 
 ## 示例
 
@@ -162,10 +178,10 @@ DEEPSEEK_API_KEY=sk-... cargo run -p airx --example deepseek_json
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --features airx/anthropic,airx/gemini -- -D warnings
-cargo test --workspace --features airx/anthropic,airx/gemini
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ./scripts/check-deps.sh
 cargo check -p airx --target wasm32-unknown-unknown \
-  --no-default-features --features wasm,openai,stream,gemini
+  --no-default-features --features wasm,all-providers,stream
 ```

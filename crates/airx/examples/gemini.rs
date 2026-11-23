@@ -14,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("GEMINI_API_KEY")?;
     let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_owned());
 
-    let mut builder = Client::builder().gemini().api_key(api_key);
+    let mut builder = Client::gemini().api_key(api_key);
     if let Ok(base_url) = std::env::var("GEMINI_BASE_URL") {
         builder = builder.base_url(base_url);
     }
@@ -28,7 +28,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let response = client
-        .gemini()?
         .generate_content(model.as_str())
         .create(request)
         .await?;

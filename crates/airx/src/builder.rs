@@ -1,6 +1,8 @@
 //! Client 构建器。
 //!
 //! 只负责配置：Provider 配置与执行配置在内部分开保存，构建时组合。
+//! 每个 Provider 分支的 `build()` 直接返回该协议的客户端，
+//! 构建后即可复用，不需要再次选择 Provider。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,10 +12,9 @@ use airx_core::error::ConfigurationError;
 use airx_core::http::HeaderMap;
 use airx_transport::{RetryPolicy, Transport};
 
-use crate::client::Client;
 use crate::executor::Executor;
 
-/// Client 构建器。
+/// 执行配置构建器；随后通过 `ClientBuilder::openai` 等进入具体 Provider。
 pub struct ClientBuilder {
     transport: Option<Arc<dyn Transport>>,
     timeout: Option<Duration>,
@@ -75,6 +76,8 @@ impl ClientBuilder {
             client: self,
             api_key: None,
             base_url: None,
+            chat_path: None,
+            responses_path: None,
             organization: None,
             project: None,
         }
@@ -87,6 +90,7 @@ impl ClientBuilder {
             client: self,
             api_key: None,
             base_url: None,
+            messages_path: None,
             api_version: None,
         }
     }
@@ -101,57 +105,14 @@ impl ClientBuilder {
         }
     }
 
-    /// 构建不带 Provider 的 Client（仅含执行配置）。
-    pub fn build(self) -> Result<Client, AirxError> {
-        self.build_inner()
-    }
-
-    #[cfg(feature = "openai")]
-    pub(crate) fn build_with_openai(
-        self,
-        openai: Option<airx_protocol::openai::OpenAiConfig>,
-    ) -> Result<Client, AirxError> {
-        let mut client = self.build_inner()?;
-        client.openai = openai;
-        Ok(client)
-    }
-
-    #[cfg(feature = "anthropic")]
-    pub(crate) fn build_with_anthropic(
-        self,
-        anthropic: Option<airx_protocol::anthropic::AnthropicConfig>,
-    ) -> Result<Client, AirxError> {
-        let mut client = self.build_inner()?;
-        client.anthropic = anthropic;
-        Ok(client)
-    }
-
-    #[cfg(feature = "gemini")]
-    pub(crate) fn build_with_gemini(
-        self,
-        gemini: Option<airx_protocol::gemini::GeminiConfig>,
-    ) -> Result<Client, AirxError> {
-        let mut client = self.build_inner()?;
-        client.gemini = gemini;
-        Ok(client)
-    }
-
-    fn build_inner(self) -> Result<Client, AirxError> {
+    /// 把执行配置固化为共享的 [`Executor`]。
+    pub(crate) fn build_executor(self) -> Result<Arc<Executor>, AirxError> {
         let transport = match self.transport {
             Some(transport) => transport,
             None => default_transport(self.timeout)?,
         };
         let transport = apply_retry(transport, self.retry_policy)?;
-
-        Ok(Client {
-            executor: Arc::new(Executor::new(transport, self.default_headers)),
-            #[cfg(feature = "anthropic")]
-            anthropic: None,
-            #[cfg(feature = "gemini")]
-            gemini: None,
-            #[cfg(feature = "openai")]
-            openai: None,
-        })
+        Ok(Arc::new(Executor::new(transport, self.default_headers)))
     }
 }
 
@@ -212,6 +173,8 @@ pub struct OpenAiBuilder {
     client: ClientBuilder,
     api_key: Option<String>,
     base_url: Option<String>,
+    chat_path: Option<String>,
+    responses_path: Option<String>,
     organization: Option<String>,
     project: Option<String>,
 }
@@ -229,6 +192,22 @@ impl OpenAiBuilder {
     #[must_use]
     pub fn base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = Some(base_url.into());
+        self
+    }
+
+    /// 覆盖 Chat Completions 路径（默认 `/chat/completions`）。
+    ///
+    /// 兼容网关可传相对路径或完整 URL；`build()` 时校验。
+    #[must_use]
+    pub fn chat_path(mut self, path: impl Into<String>) -> Self {
+        self.chat_path = Some(path.into());
+        self
+    }
+
+    /// 覆盖 Responses 路径（默认 `/responses`）。
+    #[must_use]
+    pub fn responses_path(mut self, path: impl Into<String>) -> Self {
+        self.responses_path = Some(path.into());
         self
     }
 
@@ -267,8 +246,8 @@ impl OpenAiBuilder {
         self
     }
 
-    /// 构建 Client。
-    pub fn build(self) -> Result<Client, AirxError> {
+    /// 构建可复用的 OpenAI 客户端。
+    pub fn build(self) -> Result<crate::openai::OpenAi, AirxError> {
         let api_key = self.api_key.ok_or_else(|| {
             AirxError::Configuration(ConfigurationError::new("OpenAI api_key 必填"))
         })?;
@@ -283,6 +262,12 @@ impl OpenAiBuilder {
         if let Some(base_url) = self.base_url {
             config = config.with_base_url(base_url)?;
         }
+        if let Some(chat_path) = self.chat_path {
+            config = config.with_chat_path(chat_path)?;
+        }
+        if let Some(responses_path) = self.responses_path {
+            config = config.with_responses_path(responses_path)?;
+        }
         if let Some(organization) = self.organization {
             config = config.with_organization(organization);
         }
@@ -290,7 +275,10 @@ impl OpenAiBuilder {
             config = config.with_project(project);
         }
 
-        self.client.build_with_openai(Some(config))
+        Ok(crate::openai::OpenAi::new(
+            self.client.build_executor()?,
+            config,
+        ))
     }
 }
 
@@ -300,6 +288,7 @@ pub struct AnthropicBuilder {
     client: ClientBuilder,
     api_key: Option<String>,
     base_url: Option<String>,
+    messages_path: Option<String>,
     api_version: Option<String>,
 }
 
@@ -316,6 +305,13 @@ impl AnthropicBuilder {
     #[must_use]
     pub fn base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = Some(base_url.into());
+        self
+    }
+
+    /// 覆盖 Messages 路径（默认 `/v1/messages`）。
+    #[must_use]
+    pub fn messages_path(mut self, path: impl Into<String>) -> Self {
+        self.messages_path = Some(path.into());
         self
     }
 
@@ -347,8 +343,8 @@ impl AnthropicBuilder {
         self
     }
 
-    /// 构建 Client。
-    pub fn build(self) -> Result<Client, AirxError> {
+    /// 构建可复用的 Anthropic 客户端。
+    pub fn build(self) -> Result<crate::anthropic::Anthropic, AirxError> {
         let api_key = self.api_key.ok_or_else(|| {
             AirxError::Configuration(ConfigurationError::new("Anthropic api_key 必填"))
         })?;
@@ -363,11 +359,17 @@ impl AnthropicBuilder {
         if let Some(base_url) = self.base_url {
             config = config.with_base_url(base_url)?;
         }
+        if let Some(messages_path) = self.messages_path {
+            config = config.with_messages_path(messages_path)?;
+        }
         if let Some(version) = self.api_version {
             config = config.with_api_version(version);
         }
 
-        self.client.build_with_anthropic(Some(config))
+        Ok(crate::anthropic::Anthropic::new(
+            self.client.build_executor()?,
+            config,
+        ))
     }
 }
 
@@ -416,8 +418,8 @@ impl GeminiBuilder {
         self
     }
 
-    /// 构建 Client。
-    pub fn build(self) -> Result<Client, AirxError> {
+    /// 构建可复用的 Gemini 客户端。
+    pub fn build(self) -> Result<crate::gemini::Gemini, AirxError> {
         let api_key = self.api_key.ok_or_else(|| {
             AirxError::Configuration(ConfigurationError::new("Gemini api_key 必填"))
         })?;
@@ -433,6 +435,9 @@ impl GeminiBuilder {
             config = config.with_base_url(base_url)?;
         }
 
-        self.client.build_with_gemini(Some(config))
+        Ok(crate::gemini::Gemini::new(
+            self.client.build_executor()?,
+            config,
+        ))
     }
 }

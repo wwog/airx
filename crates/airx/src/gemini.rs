@@ -1,4 +1,7 @@
-//! Gemini Provider 入口。
+//! Gemini 客户端。
+//!
+//! 由 `Client::gemini()` / `Client::builder().gemini()` 构建，持有执行器与配置，
+//! 可以复用；模型仍按 Gemini 的路径约定在每次调用时指定。
 
 use std::sync::Arc;
 
@@ -10,31 +13,32 @@ use airx_protocol::gemini::generate_content::{
 };
 
 use crate::api::ApiClient;
-use crate::client::Client;
+use crate::executor::Executor;
 #[cfg(feature = "stream")]
 use crate::stream::ProtocolStream;
 
-/// Gemini Provider 视图。
-pub struct Gemini<'a> {
-    client: &'a Client,
-    config: &'a GeminiConfig,
+/// 已定性的 Gemini 客户端。
+#[derive(Clone)]
+pub struct Gemini {
+    executor: Arc<Executor>,
+    config: GeminiConfig,
 }
 
-impl<'a> Gemini<'a> {
-    pub(crate) fn new(client: &'a Client, config: &'a GeminiConfig) -> Self {
-        Self { client, config }
+impl Gemini {
+    pub(crate) fn new(executor: Arc<Executor>, config: GeminiConfig) -> Self {
+        Self { executor, config }
     }
 
     /// Provider 配置。
     pub fn config(&self) -> &GeminiConfig {
-        self.config
+        &self.config
     }
 
     /// 指定模型，进入 `generateContent` 调用。
-    pub fn generate_content(&self, model: impl Into<ModelId>) -> GenerateContent<'a> {
+    pub fn generate_content(&self, model: impl Into<ModelId>) -> GenerateContent {
         GenerateContent {
-            client: self.client,
-            config: self.config,
+            executor: Arc::clone(&self.executor),
+            config: self.config.clone(),
             model: model.into(),
         }
     }
@@ -43,13 +47,14 @@ impl<'a> Gemini<'a> {
 /// `generateContent` 调用入口。
 ///
 /// Gemini 把模型放在路径里，因此模型在进入 API 时指定。
-pub struct GenerateContent<'a> {
-    client: &'a Client,
-    config: &'a GeminiConfig,
+#[derive(Clone)]
+pub struct GenerateContent {
+    executor: Arc<Executor>,
+    config: GeminiConfig,
     model: ModelId,
 }
 
-impl GenerateContent<'_> {
+impl GenerateContent {
     /// 模型标识。
     pub fn model(&self) -> &ModelId {
         &self.model
@@ -71,7 +76,7 @@ impl GenerateContent<'_> {
         &self,
         request: GenerateContentRequest,
     ) -> Result<GenerateContentResponse, AirxError> {
-        let api = ApiClient::new(self.endpoint(), Arc::clone(&self.client.executor));
+        let api = ApiClient::new(self.endpoint(), Arc::clone(&self.executor));
         api.create(&request).await
     }
 
@@ -81,7 +86,7 @@ impl GenerateContent<'_> {
         &self,
         request: GenerateContentRequest,
     ) -> Result<ProtocolStream<GenerateContentEndpoint>, AirxError> {
-        let api = ApiClient::new(self.stream_endpoint(), Arc::clone(&self.client.executor));
+        let api = ApiClient::new(self.stream_endpoint(), Arc::clone(&self.executor));
         api.stream(&request).await
     }
 }

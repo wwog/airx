@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build()?;
 
         let started = Instant::now();
-        let mut stream = client.openai()?.chat().stream(request).await?;
+        let mut stream = client.chat().stream(request).await?;
         let mut accumulator = ChatStreamAccumulator::new();
         let mut chunks = 0usize;
         let mut first_text = None;

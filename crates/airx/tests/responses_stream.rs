@@ -52,13 +52,7 @@ async fn responses_stream_accumulates_text() {
         .build()
         .expect("request");
 
-    let mut stream = client
-        .openai()
-        .expect("openai")
-        .responses()
-        .stream(request)
-        .await
-        .expect("stream");
+    let mut stream = client.responses().stream(request).await.expect("stream");
 
     let mut accumulator = ResponsesStreamAccumulator::new();
     while let Some(event) = stream.next().await.expect("event") {
@@ -97,8 +91,6 @@ async fn responses_create_decodes_plain_json() {
         .expect("client");
 
     let response = client
-        .openai()
-        .expect("openai")
         .responses()
         .create(
             ResponsesRequest::builder()

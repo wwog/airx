@@ -10,7 +10,9 @@ license.workspace = true
 workspace = true
 
 [features]
-default = ["native", "rustls-tls", "openai", "stream"]
+# 默认开箱即用：原生 HTTP + rustls + 全部 Provider + 流式。
+# 需要裁剪时使用 default-features = false 按需选择。
+default = ["native", "rustls-tls", "all-providers", "stream"]
 
 # 平台后端
 native = ["airx-transport/native"]
@@ -74,4 +76,4 @@ required-features = ["openai"]
 
 [[example]]
 name = "deepseek_json"
-required-features = ["openai", "anthropic"]
+required-features = ["openai"]

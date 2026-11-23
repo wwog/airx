@@ -51,8 +51,8 @@ pub fn load() -> Env {
     }
 }
 
-/// 构造到网关的 Client。
-pub fn client(env: &Env) -> Client {
+/// 构造到网关的 OpenAI 客户端。
+pub fn client(env: &Env) -> OpenAi {
     Client::builder()
         .timeout(Duration::from_secs(180))
         .default_headers(headers())

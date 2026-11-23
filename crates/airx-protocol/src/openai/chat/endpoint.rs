@@ -15,8 +15,8 @@ use super::event::ChatStreamEvent;
 use super::request::ChatCompletionRequest;
 use super::response::ChatCompletionResponse;
 
-/// 端点路径（拼接到 base_url 之后）。
-pub const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
+/// 默认端点路径（可通过 [`OpenAiConfig::with_chat_path`] 覆盖）。
+pub const CHAT_COMPLETIONS_PATH: &str = crate::openai::config::DEFAULT_CHAT_PATH;
 
 /// Chat Completions 端点。
 #[derive(Debug, Clone)]
@@ -36,16 +36,8 @@ impl ChatEndpoint {
     }
 
     fn uri(&self) -> Result<Uri, AirxError> {
-        let url = format!(
-            "{}{}",
-            self.config.base_url().trim_end_matches('/'),
-            CHAT_COMPLETIONS_PATH
-        );
-        url.parse().map_err(|error| {
-            AirxError::Configuration(ConfigurationError::new(format!(
-                "无法构造 Chat Completions URL: {error}"
-            )))
-        })
+        self.config
+            .endpoint_uri(self.config.chat_path(), "Chat Completions")
     }
 }
 

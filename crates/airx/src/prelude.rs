@@ -3,13 +3,10 @@
 //! ```ignore
 //! use airx::prelude::*;
 //!
-//! let client = Client::builder()
-//!     .openai()
-//!     .api_key("sk-...")
-//!     .build()?;
+//! // build() 直接得到已定性的 OpenAI 客户端，可复用。
+//! let client = Client::openai().api_key("sk-...").build()?;
 //!
 //! let response = client
-//!     .openai()?
 //!     .chat()
 //!     .create(ChatCompletionRequest::builder()
 //!         .model("gpt-4o-mini")
@@ -49,10 +46,12 @@ pub use airx_protocol::openai::responses::{
 };
 pub use airx_transport::RetryPolicy;
 
-#[cfg(feature = "gemini")]
-pub use crate::GeminiBuilder;
-#[cfg(feature = "openai")]
-pub use crate::OpenAiBuilder;
 #[cfg(feature = "stream")]
 pub use crate::ProtocolStream;
+#[cfg(feature = "anthropic")]
+pub use crate::{Anthropic, AnthropicBuilder};
 pub use crate::{ApiClient, Client, ClientBuilder};
+#[cfg(feature = "gemini")]
+pub use crate::{Gemini, GeminiBuilder};
+#[cfg(feature = "openai")]
+pub use crate::{OpenAi, OpenAiBuilder};

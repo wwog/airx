@@ -17,8 +17,8 @@ use super::event::ResponsesEvent;
 use super::request::ResponsesRequest;
 use super::response::ResponsesResponse;
 
-/// 端点路径。
-pub const RESPONSES_PATH: &str = "/responses";
+/// 默认端点路径（可通过 [`OpenAiConfig::with_responses_path`] 覆盖）。
+pub const RESPONSES_PATH: &str = crate::openai::config::DEFAULT_RESPONSES_PATH;
 
 /// Responses 端点。
 #[derive(Debug, Clone)]
@@ -38,16 +38,8 @@ impl ResponsesEndpoint {
     }
 
     fn uri(&self) -> Result<Uri, AirxError> {
-        let url = format!(
-            "{}{}",
-            self.config.base_url().trim_end_matches('/'),
-            RESPONSES_PATH
-        );
-        url.parse().map_err(|error| {
-            AirxError::Configuration(ConfigurationError::new(format!(
-                "无法构造 Responses URL: {error}"
-            )))
-        })
+        self.config
+            .endpoint_uri(self.config.responses_path(), "Responses")
     }
 }
 

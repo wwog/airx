@@ -31,7 +31,7 @@ const RESPONSE: &str = r#"{
   "responseId": "resp-1"
 }"#;
 
-fn client(mock: &MockTransport) -> Client {
+fn client(mock: &MockTransport) -> Gemini {
     Client::builder()
         .transport(mock.clone())
         .gemini()
@@ -55,8 +55,6 @@ async fn generate_content_runs_the_full_pipeline() {
     mock.push_json(200, RESPONSE);
 
     let response = client(&mock)
-        .gemini()
-        .expect("gemini")
         .generate_content("gemini-2.5-flash")
         .create(request())
         .await
@@ -96,8 +94,6 @@ async fn model_prefix_is_normalized() {
     mock.push_json(200, RESPONSE);
 
     client(&mock)
-        .gemini()
-        .expect("gemini")
         .generate_content("models/gemini-2.5-flash")
         .create(request())
         .await
@@ -123,8 +119,6 @@ async fn base_url_override_is_used() {
         .expect("client");
 
     client
-        .gemini()
-        .expect("gemini")
         .generate_content("gemini-2.5-flash")
         .create(request())
         .await
@@ -145,8 +139,6 @@ async fn provider_error_is_preserved() {
     );
 
     let error = client(&mock)
-        .gemini()
-        .expect("gemini")
         .generate_content("gemini-2.5-flash")
         .create(request())
         .await
@@ -162,14 +154,14 @@ async fn provider_error_is_preserved() {
     }
 }
 
-#[tokio::test]
-async fn unconfigured_provider_is_a_configuration_error() {
-    let client = Client::builder()
+#[test]
+fn missing_api_key_is_a_configuration_error() {
+    let result = Client::builder()
         .transport(MockTransport::new())
-        .build()
-        .expect("client");
+        .gemini()
+        .build();
 
-    assert!(matches!(client.gemini(), Err(AirxError::Configuration(_))));
+    assert!(matches!(result, Err(AirxError::Configuration(_))));
 }
 
 #[cfg(feature = "stream")]
@@ -190,8 +182,6 @@ async fn stream_accumulates_text_and_usage() {
     );
 
     let mut stream = client(&mock)
-        .gemini()
-        .expect("gemini")
         .generate_content("gemini-2.5-flash")
         .stream(request())
         .await
@@ -234,8 +224,6 @@ async fn truncated_stream_is_an_error() {
     );
 
     let mut stream = client(&mock)
-        .gemini()
-        .expect("gemini")
         .generate_content("gemini-2.5-flash")
         .stream(request())
         .await
@@ -265,8 +253,6 @@ async fn stream_http_error_is_surfaced() {
     );
 
     let error = client(&mock)
-        .gemini()
-        .expect("gemini")
         .generate_content("gemini-2.5-flash")
         .stream(request())
         .await

@@ -50,13 +50,7 @@ async fn streams_text_tool_calls_and_usage_through_accumulator() {
         .build()
         .expect("request");
 
-    let mut stream = client
-        .openai()
-        .expect("openai")
-        .chat()
-        .stream(request)
-        .await
-        .expect("stream");
+    let mut stream = client.chat().stream(request).await.expect("stream");
 
     let mut accumulator = ChatStreamAccumulator::new();
     let mut event_count = 0;
@@ -106,8 +100,6 @@ async fn non_success_stream_is_decoded_as_provider_error() {
         .expect("client");
 
     let error = client
-        .openai()
-        .expect("openai")
         .chat()
         .stream(
             ChatCompletionRequest::builder()
@@ -145,8 +137,6 @@ async fn malformed_stream_chunk_surfaces_deserialization_error() {
         .expect("client");
 
     let mut stream = client
-        .openai()
-        .expect("openai")
         .chat()
         .stream(
             ChatCompletionRequest::builder()

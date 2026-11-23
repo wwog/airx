@@ -49,21 +49,43 @@ Provider 是「协议 × 部署配置」，不是协议本身。同一协议客�
 
 `base_url` 必须为绝对地址；末尾 `/` 会被去掉。使用网关时按上表保留或省略 `/v1`。
 
+**官方地址是默认值**：`Client::openai().api_key(...)` / `Client::anthropic().api_key(...)`
+无需传 `base_url`，只有接入三方兼容网关时才覆盖。
+
+模式路径与 `base_url` 解耦，可独立覆盖（相对路径拼接到 `base_url`，完整 URL 直接使用）：
+
+| Provider | 模式 | 默认路径 | 构建时覆盖 | 运行时覆盖 |
+| --- | --- | --- | --- | --- |
+| OpenAI | chat | `/chat/completions` | `.chat_path(...)` | `openai.chat_at(...)` |
+| OpenAI | responses | `/responses` | `.responses_path(...)` | `openai.responses_at(...)` |
+| Anthropic | messages | `/v1/messages` | `.messages_path(...)` | `anthropic.messages_at(...)` |
+
+```rust
+// 兼容网关：base_url + 各模式路径都可覆盖；build 后复用
+let gateway = Client::openai()
+    .api_key(key)
+    .base_url("https://gateway.example.com/v1")
+    .chat_path("v2/chat")                                // 相对路径
+    .responses_path("https://other.example.com/respond") // 完整 URL
+    .build()?;
+
+gateway.chat().create(request).await?;                    // 复用构建时配置
+gateway.chat_at("/override/chat").create(request).await?; // 仅本次覆盖
+```
+
 ## 5. DeepSeek 兼容部署与 JSON mode
 
 DeepSeek 没有独立协议模块，接入方式是“同一协议 + base_url”：
 
 ```rust
-// OpenAI-Compatible
-Client::builder()
-    .openai()
+// OpenAI-Compatible：build() 返回可复用的 OpenAi 客户端
+let openai = Client::openai()
     .api_key(key)
     .base_url("https://api.deepseek.com")
     .build()?;
 
-// Anthropic-Compatible
-Client::builder()
-    .anthropic()
+// Anthropic-Compatible：build() 返回可复用的 Anthropic 客户端
+let anthropic = Client::anthropic()
     .api_key(key)
     .base_url("https://api.deepseek.com/anthropic")
     .build()?;
@@ -77,14 +99,14 @@ JSON mode（官方指南）：
 - 设置足够的 `max_tokens`，空 content 时重试或兜底。
 - 完整示例：[deepseek_json.rs](../crates/airx/examples/deepseek_json.rs)。
 
-Anthropic-Compatible 部署请使用 Native API（`client.anthropic()`）。`thinking` /
+Anthropic-Compatible 部署请使用 Anthropic Native API。`thinking` /
 `reasoning_effort` 通过 Chat 字段或 `extensions.thinking` 传入；DeepSeek 的
 `temperature` 在 thinking 模式下无效、`tool_choice=required` 在 thinking 模式下被拒绝，
 这些由调用方按提示与官方文档处理，airx 不再内置 provider 专属策略。
 
 ## 6. Gemini 行为约定
 
-- **模型在路径中**：`client.gemini()?.generate_content(model)` 决定
+- **模型在路径中**：`gemini.generate_content(model)` 决定
   `/models/{model}:generateContent`；请求体不含 `model`。裸模型名会补 `models/`
   前缀，`models/…` / `tunedModels/…` / `publishers/…` 原样使用。
 - **认证**：使用 `x-goog-api-key` Header，不把 key 放进 query，避免出现在日志与 URL 中。

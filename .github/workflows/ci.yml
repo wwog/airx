@@ -4,9 +4,6 @@ on:
   push:
   pull_request:
 
-env:
-  ALL_FEATURES: airx/anthropic,airx/gemini
-
 jobs:
   ci:
     runs-on: ubuntu-latest
@@ -25,13 +22,13 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --features "$ALL_FEATURES" -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace --features "$ALL_FEATURES"
+        run: cargo test --workspace
 
       - name: Docs
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --features "$ALL_FEATURES"
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
       - name: Dependency direction
         run: ./scripts/check-deps.sh
@@ -48,4 +45,4 @@ jobs:
           -p airx
           --target wasm32-unknown-unknown
           --no-default-features
-          --features wasm,openai,stream,gemini
+          --features wasm,all-providers,stream

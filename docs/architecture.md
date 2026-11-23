@@ -262,7 +262,7 @@ airx/
 │   ├── airx/                  # L4 门面
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── client.rs      # 组合 Protocol + Transport
+│   │       ├── client.rs      # 构建入口：Client::openai/anthropic/gemini
 │   │       ├── builder.rs     # 配置聚合
 │   │       ├── executor.rs    # 执行级默认 Header + Transport
 │   │       ├── openai.rs      # OpenAI typed endpoint 入口
@@ -474,9 +474,9 @@ CI 通过 `scripts/check-deps.sh`（基于 `cargo metadata`）校验依赖方向
 
 - `Client` / `Builder` / 配置合并 / `prelude`。
 - 把 protocol 的编码结果交给 transport 执行，再把响应交回 protocol 解码。
-- typed endpoint 入口：`client.openai().responses()`、`client.anthropic().messages()`、
-  `client.gemini().generate_content(model)`；兼容部署（如 DeepSeek）通过对应协议的
-  `base_url` 接入。
+- 构建即定性：`Client::openai()` / `Client::anthropic()` / `Client::gemini()` 的
+  `build()` 直接返回 `OpenAi` / `Anthropic` / `Gemini` 客户端，后续请求复用同一客户端，
+  不再重复选择 Provider；兼容部署通过对应协议的 `base_url` 接入。
 - Feature 汇总与平台选择（native / wasm）。
 - 对外错误 re-export 与统一文档。
 
@@ -710,10 +710,15 @@ HTTP Body Stream → Transport Stream → SSE Decoder → Raw Event
 
 | 配置类型 | 内容 | 归属 |
 | --- | --- | --- |
-| Provider 配置 | api_key、base_url、API version、默认/Beta Header、组织/项目 | `airx-protocol::<provider>::config` |
+| Provider 配置 | api_key、base_url、模式路径、API version、默认/Beta Header、组织/项目 | `airx-protocol::<provider>::config` |
 | 执行配置 | transport、timeout、retry_policy、default_headers | `airx::config` / `airx-transport` |
 
 `base_url` 必须可覆盖：官方 API、OpenAI Compatible、企业代理、自建服务、第三方 Gateway 都是真实场景。不允许把官方域名硬编码进通用路径构造。
+
+模式路径（OpenAI chat / responses、Anthropic messages）同样有官方默认值，可独立覆盖为
+相对路径或完整 URL。未覆盖时，构建出的客户端在每次 `.chat()` / `.responses()` /
+`.messages()` 调用中复用构建时的配置；`chat_at` / `responses_at` / `messages_at`
+只对单次调用生效。
 
 ---
 
@@ -724,13 +729,10 @@ HTTP Body Stream → Transport Stream → SSE Decoder → Raw Event
 ```rust
 use airx::prelude::*;
 
-let client = Client::builder()
-    .openai()
-    .api_key("sk-xxx")
-    .build()?;
+// build() 返回已定性的 OpenAI 客户端，可复用
+let openai = Client::openai().api_key("sk-xxx").build()?;
 
-let response = client
-    .openai()?                 // Client 可能未配置该 Provider
+let response = openai
     .chat()
     .create(
         ChatCompletionRequest::builder()
@@ -742,7 +744,7 @@ let response = client
 ```
 
 ```rust
-let mut stream = client.openai().responses().stream(request).await?;
+let mut stream = openai.responses().stream(request).await?;
 
 while let Some(event) = stream.next().await {
     match event? {
@@ -753,16 +755,19 @@ while let Some(event) = stream.next().await {
 }
 ```
 
-`.openai()` / `.anthropic()` / `.gemini()` 返回**静态类型**的 API Client，不做字符串查找 Provider；
-兼容部署通过 `base_url` 指定。
+`build()` 返回**静态类型**的 Provider 客户端（`OpenAi` / `Anthropic` / `Gemini`），
+不做字符串查找 Provider；客户端持有执行器与配置，可复用发起多次请求。
+官方地址与模式路径都有默认值；兼容部署按需覆盖 `base_url` / `chat_path` /
+`responses_path` / `messages_path`，或使用 `chat_at` 等单次覆盖。
 
 ### 8.2 Gemini API
 
 Gemini 的模型位于路径中，因此模型在进入 API 时指定：
 
 ```rust
-let response = client
-    .gemini()?
+let gemini = Client::gemini().api_key("...").build()?;
+
+let response = gemini
     .generate_content("gemini-2.5-flash")
     .create(
         GenerateContentRequest::builder()
@@ -795,22 +800,28 @@ println!("{}", response.text());
 
 约定：
 
-- 默认 feature 尽量少：`default = ["native", "openai"]` 量级，不默认引入全部 Provider。
+- 默认 `native + rustls-tls + all-providers + stream`：三协议开箱即用。
+  需要裁剪时使用 `default-features = false`，按需选择 Provider 与平台后端。
+- `all-providers` 只是 `openai + anthropic + gemini` 的聚合，不引入额外依赖。
 - Cargo features 是 additive：同一依赖被多路径引入会合并，需特别关注 TLS 选择与 native/wasm 的目标依赖。
+- `rustls-tls` / `native-tls` 二选一；`native` / `wasm` 按目标平台选择。
 - 没有流式能力的协议不被 `stream` 强行牵连，按模块导出。
 
 ### 8.4 Builder 只做配置
 
 ```rust
-let client = Client::builder()
+let openai = Client::builder()
     .transport(transport)
     .timeout(Duration::from_secs(60))
     .retry_policy(RetryPolicy::default())
     .default_headers(headers)
+    .openai()
+    .api_key("sk-...")
     .build()?;
 ```
 
 Builder 不做业务决策、不做请求改写、不做隐式重试。
+执行配置先累积，`build()` 时与 Provider 配置一起固化为可复用的客户端。
 
 ---
 
@@ -942,8 +953,8 @@ M3（端到端竖切，契约冻结）：
 | --- | --- |
 | Protocol | `airx_protocol::Endpoint`（`encode` / `decode`，纯函数）；`openai::chat` 的 Request / Message / Response / Endpoint / 错误映射 / `OpenAiConfig`（Debug 脱敏、base_url 校验） |
 | Transport | 固定错误形状 + `BoxFuture` + Mock/Reqwest 双实现 |
-| Client | `Client` / `ClientBuilder` / `OpenAiBuilder` / typed `chat().create()`；执行级 Header 不覆盖协议 Header；`openai()` 返回 `Result` 以表达“未配置该 Provider” |
-| 端到端 | Mock 驱动的 8 个集成用例：全链路、Provider 错误、Header 优先级、默认不重试、429 重试、base_url 覆盖、未配置 Provider、扩展字段透传 |
+| Client | `Client` / `ClientBuilder` / `OpenAiBuilder` / typed `chat().create()`；执行级 Header 不覆盖协议 Header；Provider Builder 的 `build()` 返回已定性客户端，可复用 |
+| 端到端 | Mock 驱动的 8 个集成用例：全链路、Provider 错误、Header 优先级、默认不重试、429 重试、base_url 覆盖、缺失 api_key、扩展字段透传 |
 
 M4（OpenAI Chat 完整化与流式）：
 
@@ -1002,7 +1013,7 @@ M9（生产化）：
 | 文档 | `protocol-support.md`、`compatibility.md`、README 快速开始与 Feature 表 |
 | 示例 | `chat`、`chat_stream`、`gemini`、`gemini_stream` |
 
-测试总计 **212** 个，`cargo test --workspace --features airx/anthropic,airx/gemini` 全绿。
+测试总计 **227** 个，`cargo test --workspace --features airx/anthropic,airx/gemini` 全绿。
 覆盖 SSE 任意字节切分、UTF-8 跨 chunk、CRLF/CR、BOM、截断流、增量 JSON、四个协议路径的
 流式事件与聚合、错误映射、重试幂等分支、Header 优先级、Gemini 完成/截断语义。
 

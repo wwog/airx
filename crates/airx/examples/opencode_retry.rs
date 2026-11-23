@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             fail_first: 1,
         };
 
-        let client: Client = Client::builder()
+        let client: OpenAi = Client::builder()
             .transport(flaky)
             .retry_policy(
                 RetryPolicy::standard()
@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .max_completion_tokens(256)
             .build()?;
 
-        let response = client.openai()?.chat().create(request).await?;
+        let response = client.chat().create(request).await?;
         let text = response
             .first_content()
             .unwrap_or_default()

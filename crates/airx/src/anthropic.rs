@@ -1,4 +1,7 @@
-//! Anthropic Provider 入口。
+//! Anthropic 客户端。
+//!
+//! 由 `Client::anthropic()` / `Client::builder().anthropic()` 构建，
+//! 持有执行器与配置，可以复用发起任意多次请求。
 
 use std::sync::Arc;
 
@@ -7,38 +10,52 @@ use airx_protocol::anthropic::AnthropicConfig;
 use airx_protocol::anthropic::messages::{MessagesEndpoint, MessagesRequest, MessagesResponse};
 
 use crate::api::ApiClient;
-use crate::client::Client;
+use crate::executor::Executor;
 #[cfg(feature = "stream")]
 use crate::stream::ProtocolStream;
 
-/// Anthropic Provider 视图。
-pub struct Anthropic<'a> {
-    client: &'a Client,
-    config: &'a AnthropicConfig,
+/// 已定性的 Anthropic 客户端。
+#[derive(Clone)]
+pub struct Anthropic {
+    executor: Arc<Executor>,
+    config: AnthropicConfig,
 }
 
-impl<'a> Anthropic<'a> {
-    pub(crate) fn new(client: &'a Client, config: &'a AnthropicConfig) -> Self {
-        Self { client, config }
+impl Anthropic {
+    pub(crate) fn new(executor: Arc<Executor>, config: AnthropicConfig) -> Self {
+        Self { executor, config }
     }
 
     /// Provider 配置。
     pub fn config(&self) -> &AnthropicConfig {
-        self.config
+        &self.config
     }
 
-    /// Messages API。
+    /// Messages API（使用构建时的路径配置）。
     pub fn messages(&self) -> Messages {
+        self.messages_with(&self.config)
+    }
+
+    /// Messages API，本次调用临时覆盖路径。
+    ///
+    /// 路径可以是相对路径（拼接到 `base_url`）或完整 URL。
+    pub fn messages_at(&self, path: impl AsRef<str>) -> Result<Messages, AirxError> {
+        let config = self.config.clone().with_messages_path(path)?;
+        Ok(self.messages_with(&config))
+    }
+
+    fn messages_with(&self, config: &AnthropicConfig) -> Messages {
         Messages {
             api: ApiClient::new(
-                MessagesEndpoint::new(self.config.clone()),
-                Arc::clone(&self.client.executor),
+                MessagesEndpoint::new(config.clone()),
+                Arc::clone(&self.executor),
             ),
         }
     }
 }
 
 /// Messages 调用入口。
+#[derive(Clone)]
 pub struct Messages {
     api: ApiClient<MessagesEndpoint>,
 }

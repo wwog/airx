@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 结构化输出：JSON Schema → 本地合成一张文字 SVG。
-async fn structured_output(client: &Client, model: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn structured_output(client: &OpenAi, model: &str) -> Result<(), Box<dyn std::error::Error>> {
     let request = ChatCompletionRequest::builder()
         .model(model)
         .user("为一张纯文字海报生成 JSON：title 一行，lines 两行；中文或英文均可。")
@@ -64,7 +64,7 @@ async fn structured_output(client: &Client, model: &str) -> Result<(), Box<dyn s
         .max_completion_tokens(1024)
         .build()?;
 
-    let response = client.openai()?.chat().create(request).await?;
+    let response = client.chat().create(request).await?;
     let text = response.first_content().unwrap_or_default();
     let poster: Value = serde_json::from_str(text)
         .map_err(|error| format!("模型没有返回合法 JSON: {error}; 原文: {text}"))?;
@@ -102,7 +102,7 @@ async fn structured_output(client: &Client, model: &str) -> Result<(), Box<dyn s
 }
 
 /// 工具调用：先让模型调用工具，再回传结果获取最终回答。
-async fn tool_calling(client: &Client, model: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn tool_calling(client: &OpenAi, model: &str) -> Result<(), Box<dyn std::error::Error>> {
     let user_prompt = "查询新加坡当前天气，然后用一句话回答。必须调用工具。";
     let tools = [Tool::function(
         "get_weather",
@@ -122,7 +122,7 @@ async fn tool_calling(client: &Client, model: &str) -> Result<(), Box<dyn std::e
         .max_completion_tokens(512)
         .build()?;
 
-    let response = client.openai()?.chat().create(first).await?;
+    let response = client.chat().create(first).await?;
     let calls = response
         .choices
         .first()
@@ -163,7 +163,7 @@ async fn tool_calling(client: &Client, model: &str) -> Result<(), Box<dyn std::e
         .max_completion_tokens(512)
         .build()?;
 
-    let final_response = client.openai()?.chat().create(second).await?;
+    let final_response = client.chat().create(second).await?;
     let text = final_response.first_content().unwrap_or_default();
     println!("tools: 最终回答 = {text:?}");
     if text.is_empty() {

@@ -58,13 +58,7 @@ async fn messages_stream_skips_ping_and_accumulates() {
         .build()
         .expect("request");
 
-    let mut stream = client
-        .anthropic()
-        .expect("anthropic")
-        .messages()
-        .stream(request)
-        .await
-        .expect("stream");
+    let mut stream = client.messages().stream(request).await.expect("stream");
 
     let mut accumulator = MessagesStreamAccumulator::new();
     let mut events = 0;
@@ -99,8 +93,6 @@ async fn messages_create_decodes_plain_json() {
         .expect("client");
 
     let response = client
-        .anthropic()
-        .expect("anthropic")
         .messages()
         .create(
             MessagesRequest::builder()
