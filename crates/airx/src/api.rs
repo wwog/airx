@@ -23,7 +23,7 @@ pub struct ApiClient<P> {
 }
 
 impl<P> ApiClient<P> {
-    #[cfg(any(feature = "openai", feature = "anthropic"))]
+    #[cfg(any(feature = "openai", feature = "anthropic", feature = "gemini"))]
     pub(crate) fn new(endpoint: P, executor: Arc<Executor>) -> Self {
         Self { endpoint, executor }
     }

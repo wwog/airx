@@ -53,10 +53,6 @@ pub enum AirxError {
     #[error(transparent)]
     Stream(#[from] StreamError),
 
-    /// 统一层在 `Strict` 模式下遇到目标协议无法表达的能力。
-    #[error(transparent)]
-    Compatibility(#[from] CompatibilityError),
-
     /// 客户端配置错误。
     #[error(transparent)]
     Configuration(#[from] ConfigurationError),
@@ -414,23 +410,6 @@ pub enum StreamErrorKind {
     /// 状态机处于非法状态。
     #[error("invalid stream state")]
     InvalidState,
-}
-
-/// 统一层无法表达某能力（`Strict` 模式）。
-#[derive(Debug, thiserror::Error)]
-#[error("incompatible request: {message}")]
-pub struct CompatibilityError {
-    /// 不可表达的具体能力与原因。
-    pub message: String,
-}
-
-impl CompatibilityError {
-    /// 创建兼容性错误。
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
 }
 
 /// 客户端配置错误。

@@ -1,0 +1,73 @@
+{
+  "systemInstruction": {
+    "parts": [
+      { "text": "be concise" }
+    ]
+  },
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{ "text": "Hello" }]
+    },
+    {
+      "role": "model",
+      "parts": [{ "text": "Hi!" }]
+    },
+    {
+      "role": "user",
+      "parts": [
+        { "text": "What is the weather in Singapore?" },
+        {
+          "inlineData": {
+            "mimeType": "image/png",
+            "data": "iVBORw0KGgo="
+          }
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "get_weather",
+          "description": "Get the current weather for a city",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": { "type": "string" }
+            },
+            "required": ["city"]
+          }
+        }
+      ]
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "AUTO"
+    }
+  },
+  "generationConfig": {
+    "temperature": 0.2,
+    "topP": 0.95,
+    "topK": 40,
+    "maxOutputTokens": 256,
+    "stopSequences": ["END"],
+    "responseMimeType": "text/plain",
+    "thinkingConfig": {
+      "thinkingBudget": 1024,
+      "includeThoughts": true
+    }
+  },
+  "safetySettings": [
+    {
+      "category": "HARM_CATEGORY_HARASSMENT",
+      "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+    }
+  ],
+  "cachedContent": "cachedContents/abc",
+  "futureField": {
+    "keep": true
+  }
+}

@@ -18,8 +18,7 @@ ALLOWED = {
     "airx-core": set(),
     "airx-protocol": {"airx-core"},
     "airx-transport": {"airx-core"},
-    "airx-unified": {"airx-core", "airx-protocol"},
-    "airx": {"airx-core", "airx-protocol", "airx-transport", "airx-unified"},
+    "airx": {"airx-core", "airx-protocol", "airx-transport"},
 }
 
 with open(sys.argv[1], encoding="utf-8") as fh:
@@ -46,5 +45,5 @@ if problems:
         print(f"  {problem}", file=sys.stderr)
     sys.exit(1)
 
-print("依赖方向检查通过：5 个 crate，单向无环")
+print("依赖方向检查通过：4 个 crate，单向无环")
 PY

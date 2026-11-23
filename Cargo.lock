@@ -9,7 +9,6 @@ dependencies = [
  "airx-core",
  "airx-protocol",
  "airx-transport",
- "airx-unified",
  "bytes",
  "dotenvy",
  "futures-util",
@@ -58,16 +57,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.7.1",
  "web-sys",
-]
-
-[[package]]
-name = "airx-unified"
-version = "0.1.0"
-dependencies = [
- "airx-core",
- "airx-protocol",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -201,6 +190,10 @@ checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "deepseek-agent"
+version = "0.1.0"
 
 [[package]]
 name = "displaydoc"

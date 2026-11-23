@@ -1,0 +1,43 @@
+{
+  "candidates": [
+    {
+      "index": 0,
+      "content": {
+        "role": "model",
+        "parts": [
+          { "text": "Let me think.", "thought": true, "thoughtSignature": "sig-1" },
+          { "text": "It is sunny in Singapore." },
+          {
+            "functionCall": {
+              "name": "get_weather",
+              "args": { "city": "Singapore" }
+            }
+          }
+        ]
+      },
+      "finishReason": "STOP",
+      "safetyRatings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "probability": "NEGLIGIBLE"
+        }
+      ],
+      "tokenCount": 42,
+      "groundingMetadata": {
+        "webSearchQueries": ["weather Singapore"]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 10,
+    "candidatesTokenCount": 20,
+    "totalTokenCount": 33,
+    "thoughtsTokenCount": 3,
+    "cachedContentTokenCount": 2
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "resp-123",
+  "futureTopField": {
+    "keep": true
+  }
+}

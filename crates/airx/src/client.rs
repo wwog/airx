@@ -2,13 +2,15 @@
 
 use std::sync::Arc;
 
-#[cfg(any(feature = "openai", feature = "anthropic"))]
+#[cfg(any(feature = "openai", feature = "anthropic", feature = "gemini"))]
 use airx_core::AirxError;
-#[cfg(any(feature = "openai", feature = "anthropic"))]
+#[cfg(any(feature = "openai", feature = "anthropic", feature = "gemini"))]
 use airx_core::error::ConfigurationError;
 use airx_core::http::HeaderMap;
 #[cfg(feature = "anthropic")]
 use airx_protocol::anthropic::AnthropicConfig;
+#[cfg(feature = "gemini")]
+use airx_protocol::gemini::GeminiConfig;
 #[cfg(feature = "openai")]
 use airx_protocol::openai::OpenAiConfig;
 
@@ -16,6 +18,8 @@ use airx_protocol::openai::OpenAiConfig;
 use crate::anthropic::Anthropic;
 use crate::builder::ClientBuilder;
 use crate::executor::Executor;
+#[cfg(feature = "gemini")]
+use crate::gemini::Gemini;
 #[cfg(feature = "openai")]
 use crate::openai::OpenAi;
 
@@ -24,6 +28,8 @@ pub struct Client {
     pub(crate) executor: Arc<Executor>,
     #[cfg(feature = "anthropic")]
     pub(crate) anthropic: Option<AnthropicConfig>,
+    #[cfg(feature = "gemini")]
+    pub(crate) gemini: Option<GeminiConfig>,
     #[cfg(feature = "openai")]
     pub(crate) openai: Option<OpenAiConfig>,
 }
@@ -56,6 +62,17 @@ impl Client {
             ))
         })?;
         Ok(Anthropic::new(self, config))
+    }
+
+    /// 进入 Gemini Provider。
+    #[cfg(feature = "gemini")]
+    pub fn gemini(&self) -> Result<Gemini<'_>, AirxError> {
+        let config = self.gemini.as_ref().ok_or_else(|| {
+            AirxError::Configuration(ConfigurationError::new(
+                "该 Client 未配置 Gemini Provider，请使用 Client::builder().gemini()",
+            ))
+        })?;
+        Ok(Gemini::new(self, config))
     }
 
     /// 执行级默认 Header。

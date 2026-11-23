@@ -1,4 +1,4 @@
-//! 全功能：结构化输出、工具调用、Unified API、能力判定。
+//! 全功能：结构化输出与工具调用。
 //!
 //! ```bash
 //! cargo run -p airx --example opencode_full
@@ -20,21 +20,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for model in &env.models {
         println!("\n=== {model} · 全功能 ===");
 
-        let capabilities =
-            client.capabilities(&ProviderId::openai(), &ModelId::new(model.as_str()));
-        println!(
-            "capabilities: tools={:?} streaming={:?} vision={:?}",
-            capabilities.tools, capabilities.streaming, capabilities.vision
-        );
-
         if let Err(error) = structured_output(&client, model).await {
             failures.push(format!("{model} · 结构化输出: {error}"));
         }
         if let Err(error) = tool_calling(&client, model).await {
             failures.push(format!("{model} · 工具调用: {error}"));
-        }
-        if let Err(error) = unified(&client, model).await {
-            failures.push(format!("{model} · Unified: {error}"));
         }
     }
 
@@ -178,34 +168,6 @@ async fn tool_calling(client: &Client, model: &str) -> Result<(), Box<dyn std::e
     println!("tools: 最终回答 = {text:?}");
     if text.is_empty() {
         return Err("工具结果回传后没有最终回答".into());
-    }
-    Ok(())
-}
-
-/// Unified API：同一请求经 Adapter 走原生 Chat。
-async fn unified(client: &Client, model: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let response = client
-        .generate(
-            GenerateRequest::builder()
-                .model(model)
-                // 所有模型都走同一个 OpenAI-Compatible 网关，显式指定 Provider，
-                // 避免按模型名推断到 DeepSeek/Anthropic 的专属端点。
-                .provider(ProviderId::openai())
-                .instructions("用一句话回答，不要展开。")
-                .user("airx 是什么？")
-                .max_tokens(512)
-                .build()?,
-        )
-        .await?;
-
-    println!(
-        "unified: provider={} text={:?} warnings={}",
-        response.provider,
-        response.text(),
-        response.warnings.len()
-    );
-    if response.text().is_empty() {
-        return Err("Unified 响应没有文本".into());
     }
     Ok(())
 }

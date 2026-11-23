@@ -25,6 +25,15 @@ pub use airx_protocol::anthropic::messages::{
     JsonOutputFormat, MessagesEvent, MessagesRequest, MessagesResponse, MessagesStreamAccumulator,
     OutputConfig, OutputEffort, Role, ThinkingConfig, ThinkingDisplay,
 };
+#[cfg(feature = "gemini")]
+pub use airx_protocol::gemini::generate_content::{
+    Candidate, Content, FunctionCallPart, FunctionCallingConfig, FunctionCallingMode,
+    FunctionDeclaration, GenerateContentRequest, GenerateContentResponse,
+    GenerateContentStreamAccumulator, GenerationConfig, Part, PromptFeedback, Role as GeminiRole,
+    SafetySetting, ThinkingConfig as GeminiThinkingConfig, Tool as GeminiTool, ToolConfig,
+};
+#[cfg(feature = "gemini")]
+pub use airx_protocol::gemini::{SafetyRating, UsageMetadata};
 #[cfg(all(feature = "openai", feature = "stream"))]
 pub use airx_protocol::openai::chat::ChatStreamAccumulator;
 #[cfg(feature = "openai")]
@@ -39,12 +48,9 @@ pub use airx_protocol::openai::responses::{
     ResponsesEvent, ResponsesRequest, ResponsesResponse, ResponsesStreamAccumulator, TextFormat,
 };
 pub use airx_transport::RetryPolicy;
-#[cfg(feature = "unified")]
-pub use airx_unified::{
-    Adapted, GenerateRequest, GenerateResponse, GenerationOptions, ProviderExtensions,
-    Warning as CompatibilityWarning,
-};
 
+#[cfg(feature = "gemini")]
+pub use crate::GeminiBuilder;
 #[cfg(feature = "openai")]
 pub use crate::OpenAiBuilder;
 #[cfg(feature = "stream")]

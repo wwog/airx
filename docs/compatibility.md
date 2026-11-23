@@ -43,6 +43,7 @@ Provider 是「协议 × 部署配置」，不是协议本身。同一协议客�
 | --- | --- | --- |
 | OpenAI | `https://api.openai.com/v1` | `{base}/chat/completions`、`{base}/responses` |
 | Anthropic | `https://api.anthropic.com` | `{base}/v1/messages` |
+| Gemini | `https://generativelanguage.googleapis.com/v1beta` | `{base}/models/{model}:generateContent`、`…:streamGenerateContent?alt=sse` |
 | DeepSeek (OpenAI-Compatible) | `https://api.deepseek.com` | `{base}/chat/completions` |
 | DeepSeek (Anthropic-Compatible) | `https://api.deepseek.com/anthropic` | `{base}/v1/messages` |
 
@@ -76,29 +77,29 @@ JSON mode（官方指南）：
 - 设置足够的 `max_tokens`，空 content 时重试或兜底。
 - 完整示例：[deepseek_json.rs](../crates/airx/examples/deepseek_json.rs)。
 
-Unified 的 `ProviderId::deepseek` 只作为标签，实际走 OpenAI-Compatible Chat；
 Anthropic-Compatible 部署请使用 Native API（`client.anthropic()`）。`thinking` /
 `reasoning_effort` 通过 Chat 字段或 `extensions.thinking` 传入；DeepSeek 的
 `temperature` 在 thinking 模式下无效、`tool_choice=required` 在 thinking 模式下被拒绝，
 这些由调用方按提示与官方文档处理，airx 不再内置 provider 专属策略。
 
-## 6. Unified 兼容模式
+## 6. Gemini 行为约定
 
-- `Strict`（`Client::generate`）：不可表达能力直接报 `Compatibility` 错误。
-- `BestEffort`（`Client::generate_best_effort`）：降级并在 `GenerateResponse.warnings` 返回原因。
-
-映射规则摘要：
-
-| 统一内容 | OpenAI Chat | Anthropic Messages |
-| --- | --- | --- |
-| Text | 文本 / content parts | text block |
-| Image | `image_url` part | image block（`source.type = url`） |
-| ToolCall | `tool_calls` | `tool_use` |
-| ToolResult | `tool` 消息 | `tool_result` block |
-| Thinking | 不可表达（Strict 报错） | 不可回传（缺 signature，Strict 报错） |
-| Custom | 不可表达（Strict 报错） | `Other(Value)` 原样保留 |
-| max_tokens | 映射为 `max_completion_tokens` | `max_tokens`（必填，默认 4096） |
-| temperature / top_p | 透传（模型相关） | 已移除 → Strict 报错 / BestEffort 丢弃 |
+- **模型在路径中**：`client.gemini()?.generate_content(model)` 决定
+  `/models/{model}:generateContent`；请求体不含 `model`。裸模型名会补 `models/`
+  前缀，`models/…` / `tunedModels/…` / `publishers/…` 原样使用。
+- **认证**：使用 `x-goog-api-key` Header，不把 key 放进 query，避免出现在日志与 URL 中。
+- **流式**：请求 `alt=sse`；每个 SSE data 是一个 `GenerateContentResponse` 增量。
+  没有 `[DONE]`：完成信号是候选的 `finishReason`，输入被拦截时是
+  `promptFeedback.blockReason`；两者都没有时聚合器返回 `Incomplete`。
+- **thinking**：`text` 片段可带 `thought: true`；`Content::text()` 只拼接非 thinking
+  文本，`thought_text()` 单独提供。多轮工具调用需要回传 `thoughtSignature`（已建模）。
+- **工具**：`functionCall.args` 在 Gemini 中是完整 JSON 对象（不是增量字符串）；
+  聚合器按片段原样保留。服务端工具通过 `Tool::server` 声明，airx 不代发网络请求。
+- **安全拦截**：HTTP 200 + `promptFeedback.blockReason` 是正常响应，不是错误；
+  调用方应检查 `prompt_feedback` 与 `finish_reason`。
+- **未知结构**：未知 `Part` / 字段保留为 `Part::Other` 或 `extensions`，重新序列化不丢失。
+- **未封装**：`countTokens`、模型列表、Vertex AI 专属参数（可用 `extensions` 或原生
+  `Endpoint` 逃生通道）。
 
 ## 7. 服务端联网工具
 
@@ -124,12 +125,10 @@ Anthropic-Compatible 部署请使用 Native API（`client.anthropic()`）。`thi
 - **DeepSeek**：当前文档模型为 `deepseek-flash` / `deepseek-v4-pro`；
   `reasoning_effort` 取 `none|low|high|max`（`minimal→low`，`medium/xhigh→high`）；
   `response_format` 不支持 `json_schema`。
+- **Gemini**：2.5 系列用 `thinkingConfig.thinkingBudget`（`-1` 动态、`0` 关闭），
+  3 系列用 `thinkingLevel`；结构化输出用 `generationConfig.responseMimeType =
+  application/json` + `responseSchema` / `responseJsonSchema`。采样参数
+  （`temperature` / `topP` / `topK`）仍在 `generationConfig` 中。
 
 参数对齐会随官方版本演进；发现模型行为变化时，优先更新本节与
 [protocol-support.md](protocol-support.md)，再改代码。
-
-## 9. 能力判定
-
-`airx_unified::capabilities(provider, model)` 基于模型名给出已知模型的能力；
-未知模型一律 `Unknown`。`Unknown` 不等于 `Unsupported`：调用方不应假定能力可用，
-也不应把未知当作拒绝。

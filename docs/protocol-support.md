@@ -6,7 +6,7 @@
 > **对齐基准：2026-11-23。**
 > 官方文档站点在部分区域不可达，参数以官方 SDK 的生成类型 / 请求签名为准：
 > Anthropic Python SDK `messages.create`、OpenAI Python SDK Chat/Responses 参数、
-> DeepSeek JSON mode 指南。协议参数会随模型变化，接入新模型前请先核对
+> Gemini `generateContent` REST 参考、DeepSeek JSON mode 指南。协议参数会随模型变化，接入新模型前请先核对
 > [compatibility.md](compatibility.md) 与官方最新文档。
 
 ## OpenAI Chat Completions
@@ -64,6 +64,36 @@
 `output_config` / `thinking` 的 `display` 等新字段已建模；账号级参数
 （`inference_geo` / `service_tier` / `speed` / `workspace_id` 等）暂通过 `extensions` 透传。
 
+## Gemini generateContent
+
+Gemini 的模型位于路径中（`/models/{model}:generateContent`），因此
+`GenerateContentEndpoint` 持有模型，请求体只对应官方 JSON body。
+
+| 能力 | 状态 |
+| --- | --- |
+| 请求：`contents`（role + parts）/ `systemInstruction` | 已实现 |
+| 请求：`generationConfig`（temperature / topP / topK / candidateCount / maxOutputTokens / stopSequences / penalties / seed / responseModalities / mediaResolution / speechConfig / imageConfig） | 已实现 |
+| 请求：结构化输出（`responseMimeType` + `responseSchema` / `responseJsonSchema`） | 已实现 |
+| 请求：`thinkingConfig`（`thinkingBudget` / `includeThoughts` / `thinkingLevel`） | 已实现 |
+| 请求：`tools`（`functionDeclarations`）/ `toolConfig`（AUTO / ANY / NONE + allowedFunctionNames） | 已实现 |
+| 请求：服务端工具（`googleSearch` / `codeExecution` / `urlContext` 等） | `Tool::server(...)` 原样透传 |
+| 请求：`safetySettings` / `cachedContent` | 已实现 |
+| 内容片段：`text`（含 `thought` / `thoughtSignature`）/ `inlineData` / `fileData` / `functionCall` / `functionResponse` / `executableCode` / `codeExecutionResult` | 已实现 |
+| 未知片段 / 未知字段 | `Part::Other(Value)` 与 `extensions` 原样保留 |
+| 响应：`candidates`（content / finishReason / safetyRatings / citation / grounding / logprobs）/ `promptFeedback` / `usageMetadata` / `modelVersion` / `responseId` | 已实现 |
+| 错误体：`error.code` / `message` / `status` / `details` → ProviderError | 已实现 |
+| 流式：`alt=sse`，每个 data 为 `GenerateContentResponse` 增量 | 已实现 |
+| 聚合：`GenerateContentStreamAccumulator`（文本按 thought 标记合并；`finishReason` 或 `blockReason` 判定完成） | 已实现 |
+| 未覆盖：`countTokens`、模型列表、Vertex AI 专属参数 | 未封装；用 Raw 扩展字段 / 原生 Endpoint |
+
+Gemini 流没有 `[DONE]` 哨兵。`finish()` 只有在收到候选的 `finishReason`
+（或输入被拦截的 `promptFeedback.blockReason`）时才返回成功；EOF 提前发生返回
+`Incomplete`。`FINISH_REASON_UNSPECIFIED` 不视为完成。
+
+认证使用 `x-goog-api-key`（不把 key 放进 URL）；默认基地址
+`https://generativelanguage.googleapis.com/v1beta`。模型可写 `gemini-2.5-flash`、
+`models/gemini-2.5-flash`、`tunedModels/...`，端点会规范化路径。
+
 ## 兼容部署：DeepSeek
 
 DeepSeek **不是独立协议**，而是 OpenAI / Anthropic 兼容部署。airx 不提供
@@ -84,8 +114,7 @@ DeepSeek JSON mode（依据官方指南）：
 
 DeepSeek 的服务端工具（`deepseek_web_search` / `deepseek_read_url`）通过 OpenAI Chat 的
 `tools` 数组声明（`Tool::server(...)`）；`thinking` / `reasoning_effort` 通过 Chat 请求字段
-或 `extensions.thinking` 传入。Unified 中的 `ProviderId::deepseek` 仅作为标签，实际协议仍是
-OpenAI Chat；Anthropic-Compatible 部署请使用 Native API。
+或 `extensions.thinking` 传入。Anthropic-Compatible 部署请使用 Anthropic Native API。
 
 ## 服务端联网工具（Provider 后台执行）
 
@@ -115,6 +144,7 @@ OpenAI Chat；Anthropic-Compatible 部署请使用 Native API。
   - Chat：未收到 `[DONE]` → `Incomplete`
   - Responses：未收到 `response.completed` → `Incomplete`；`response.failed` / `error` → `Failed`
   - Messages：未收到 `message_stop` → `Incomplete`；`error` 事件 → `Failed`
+  - Gemini：未收到 `finishReason` / `blockReason` → `Incomplete`；SSE 内错误对象 → `Err`
 
 ## 对齐来源
 
@@ -122,4 +152,5 @@ OpenAI Chat；Anthropic-Compatible 部署请使用 Native API。
 | --- | --- |
 | Anthropic | `anthropic-sdk-python`：`Messages.create` 签名与 `message_create_params.py`、`output_config_param.py`、`thinking_config_*` |
 | OpenAI | `openai-python`：Chat Completions 参数与 docstring（`max_tokens` 弃用说明、`reasoning_effort` 取值、`verbosity`） |
+| Gemini | Google AI for Developers：`generateContent` / `streamGenerateContent` REST 参考、`GenerationConfig`、`FunctionDeclaration` / `FunctionCallingConfig`、`GenerationConfig.thinkingConfig` |
 | DeepSeek | DeepSeek API Docs：JSON mode 指南、Chat Completions 与 Anthropic 兼容端点 |

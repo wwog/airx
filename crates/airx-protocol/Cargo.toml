@@ -1,6 +1,6 @@
 [package]
 name = "airx-protocol"
-description = "airx 原生协议层：OpenAI / Anthropic / DeepSeek 的强类型模型与纯编解码"
+description = "airx 原生协议层：OpenAI / Anthropic / Gemini / DeepSeek 的强类型模型与纯编解码"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,7 @@ workspace = true
 default = []
 openai = []
 anthropic = []
+gemini = []
 stream = []
 
 [dependencies]

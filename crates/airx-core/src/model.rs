@@ -1,10 +1,10 @@
-//! 协议与 Provider 无关的标识类型与能力模型。
+//! 协议与 Provider 无关的标识类型。
 //!
 //! 三个概念必须分开：
 //!
 //! - [`ApiVersion`]：Provider 接口版本，影响请求路径与 Header。
 //! - [`ModelId`]：模型标识，只用于选择模型。
-//! - [`CapabilitySupport`]：模型能力，取决于模型、版本与参数组合。
+//! - [`ProviderId`]：Provider 标识，只用于标签与错误归属，不决定协议。
 //!
 //! `ProviderId` / `ModelId` 用字符串新类型而非枚举，
 //! 新增 Provider 不需要修改 `airx-core`。
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// Provider 标识。
 ///
-/// 预置 OpenAI / Anthropic / DeepSeek 的构造器，
+/// 预置 OpenAI / Anthropic / Gemini / DeepSeek 的构造器，
 /// 同时允许第三方扩展使用任意自定义标识。
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -45,6 +45,11 @@ impl ProviderId {
     /// Anthropic。
     pub fn anthropic() -> Self {
         Self::new("anthropic")
+    }
+
+    /// Gemini。
+    pub fn gemini() -> Self {
+        Self::new("gemini")
     }
 
     /// DeepSeek。
@@ -137,8 +142,7 @@ impl AsRef<str> for ModelId {
 
 /// Provider 的 API 版本（如 Anthropic 的 `2023-06-01`）。
 ///
-/// 与 [`ModelId`] 和 [`CapabilitySupport`] 语义分离：同一 API 版本下
-/// 不同模型的能力可以不同。
+/// 与 [`ModelId`] 语义分离：版本影响请求路径与 Header，模型只用于选择。
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ApiVersion(Box<str>);
@@ -190,52 +194,6 @@ impl AsRef<str> for ApiVersion {
     }
 }
 
-/// 单项能力的支持状态。
-///
-/// 不能用 `bool`：能力可能取决于模型、API 版本与参数组合。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CapabilitySupport {
-    /// 明确支持。
-    Supported,
-    /// 明确不支持。
-    Unsupported,
-    /// 取决于具体模型。
-    ModelDependent,
-    /// 未确认。
-    #[default]
-    Unknown,
-}
-
-impl CapabilitySupport {
-    /// 是否明确支持。
-    pub fn is_supported(self) -> bool {
-        matches!(self, Self::Supported)
-    }
-}
-
-/// 模型能力集合。
-///
-/// 默认全部为 [`CapabilitySupport::Unknown`]：
-/// “不知道”与“不支持”是不同语义，不能假定能力可用。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ModelCapabilities {
-    /// 流式输出。
-    pub streaming: CapabilitySupport,
-    /// 工具调用。
-    pub tools: CapabilitySupport,
-    /// 图像输入。
-    pub vision: CapabilitySupport,
-    /// 音频输入 / 输出。
-    pub audio: CapabilitySupport,
-    /// 结构化输出。
-    pub structured_output: CapabilitySupport,
-    /// 推理 / thinking。
-    pub reasoning: CapabilitySupport,
-    /// Prompt 缓存。
-    pub prompt_caching: CapabilitySupport,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +215,7 @@ mod tests {
     fn builtin_provider_ids_are_stable() {
         assert_eq!(ProviderId::openai().as_str(), "openai");
         assert_eq!(ProviderId::anthropic().as_str(), "anthropic");
+        assert_eq!(ProviderId::gemini().as_str(), "gemini");
         assert_eq!(ProviderId::deepseek().as_str(), "deepseek");
     }
 
@@ -266,19 +225,5 @@ mod tests {
         let version = ApiVersion::new("2023-06-01");
         assert_eq!(model.to_string(), "gpt-5");
         assert_eq!(version.to_string(), "2023-06-01");
-    }
-
-    #[test]
-    fn capabilities_default_to_unknown() {
-        let caps = ModelCapabilities::default();
-        assert_eq!(caps.streaming, CapabilitySupport::Unknown);
-        assert!(!caps.streaming.is_supported());
-        assert!(CapabilitySupport::Supported.is_supported());
-    }
-
-    #[test]
-    fn capability_support_serializes_as_snake_case() {
-        let json = serde_json::to_string(&CapabilitySupport::ModelDependent).expect("serialize");
-        assert_eq!(json, r#""model_dependent""#);
     }
 }

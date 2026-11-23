@@ -19,20 +19,19 @@ native-tls = ["airx-transport/native-tls"]
 wasm = ["airx-transport/wasm"]
 
 # Provider
-openai = ["airx-protocol/openai", "airx-unified?/openai"]
-anthropic = ["airx-protocol/anthropic", "airx-unified?/anthropic"]
-all-providers = ["openai", "anthropic"]
+openai = ["airx-protocol/openai"]
+anthropic = ["airx-protocol/anthropic"]
+gemini = ["airx-protocol/gemini"]
+all-providers = ["openai", "anthropic", "gemini"]
 
 # 能力
 stream = ["airx-core/stream", "airx-protocol/stream", "airx-transport/stream"]
 json = ["airx-core/json"]
-unified = ["dep:airx-unified"]
 
 [dependencies]
 airx-core = { path = "../airx-core", default-features = false }
 airx-protocol = { path = "../airx-protocol", default-features = false }
 airx-transport = { path = "../airx-transport", default-features = false }
-airx-unified = { path = "../airx-unified", optional = true }
 futures-util.workspace = true
 
 [dev-dependencies]
@@ -50,8 +49,12 @@ name = "chat_stream"
 required-features = ["openai", "stream"]
 
 [[example]]
-name = "unified"
-required-features = ["unified", "openai"]
+name = "gemini"
+required-features = ["gemini"]
+
+[[example]]
+name = "gemini_stream"
+required-features = ["gemini", "stream"]
 
 [[example]]
 name = "opencode_text"
@@ -67,7 +70,7 @@ required-features = ["openai", "native"]
 
 [[example]]
 name = "opencode_full"
-required-features = ["openai", "unified"]
+required-features = ["openai"]
 
 [[example]]
 name = "deepseek_json"

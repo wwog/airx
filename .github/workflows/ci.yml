@@ -5,7 +5,7 @@ on:
   pull_request:
 
 env:
-  ALL_FEATURES: airx/anthropic,airx/unified
+  ALL_FEATURES: airx/anthropic,airx/gemini
 
 jobs:
   ci:
@@ -39,10 +39,13 @@ jobs:
       - name: Check minimal features
         run: cargo check -p airx --no-default-features
 
+      - name: Check Gemini-only features
+        run: cargo check -p airx --no-default-features --features gemini
+
       - name: Check wasm32
         run: >
           cargo check
           -p airx
           --target wasm32-unknown-unknown
           --no-default-features
-          --features wasm,openai,stream,unified
+          --features wasm,openai,stream,gemini
