@@ -282,7 +282,7 @@ airx/
 │   │       │   ├── mod.rs
 │   │       │   ├── raw.rs
 │   │       │   ├── value.rs
-│   │       │   ├── canonical.rs
+│   │       │   ├── canonical.rs*   # M9：RFC 8785 JCS
 │   │       │   └── format.rs
 │   │       ├── stream/
 │   │       │   ├── mod.rs
@@ -291,11 +291,7 @@ airx/
 │   │       │   ├── buffer.rs
 │   │       │   ├── status.rs
 │   │       │   └── json_accumulator.rs
-│   │       └── http/          # 仅数据结构，不含客户端
-│   │           ├── mod.rs
-│   │           ├── request.rs
-│   │           ├── response.rs
-│   │           └── header.rs
+│   │       └── http.rs        # 仅数据结构，不含客户端
 │   │
 │   ├── airx-protocol/         # L2 原生协议层（纯函数）
 │   │   └── src/
@@ -956,15 +952,33 @@ tests/fixtures/
 
 ## 11. 当前状态
 
-**M0（Workspace 接线）已完成。**
+**M0（Workspace 接线）与 M1（`airx-core` 契约层）已完成。**
 
-- 5 个 crate 已接入 workspace，`edition = "2024"`、`resolver = "3"`、`rust-version = "1.85"`。
-- 根 `Cargo.toml` 已配置 `[workspace.dependencies]`（serde / serde_json `raw_value` / bytes / http / futures / thiserror / tracing / reqwest / gloo-net）、`[workspace.lints]`（`unsafe_code = forbid` 等）与 release profile。
-- 各 crate 按白名单声明依赖，feature 骨架（`native` / `wasm` / TLS 选择 / provider / `stream` / `unified`）已就位；当前 `src/lib.rs` 仅有职责说明，尚无实现。
+M0：
+
+- 5 个 crate 接入 workspace，`edition = "2024"`、`resolver = "3"`、`rust-version = "1.85"`。
+- 根 `Cargo.toml` 配置 `[workspace.dependencies]`、`[workspace.lints]`（`unsafe_code = forbid` 等）与 release profile。
 - 依赖方向由 `scripts/check-deps.sh` 强制；`.github/workflows/ci.yml` 覆盖 fmt、clippy、test、依赖方向、最小 feature 与 wasm32 编译。
-- 已验证：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`./scripts/check-deps.sh`、`cargo check -p airx --no-default-features`、`cargo check -p airx --target wasm32-unknown-unknown --no-default-features --features wasm,openai,stream` 全部通过。
 
-下一步 **M1**：`airx-core` 的 `error` → `model` → `http` → `json` → `stream`（SSE 先行）。
+M1（`airx-core`，纯函数、无 IO、无 async、无时钟）：
+
+| 模块 | 已实现 |
+| --- | --- |
+| `error` | `AirxError` 八类变体；`TransportError` / `HttpError` / `ProviderError` / `StreamError` 等保留 status、code、request id、原始 body 与 source 链；`is_retryable()` / `http_status()` 中立判定；WASM 下放宽 `Send + Sync` |
+| `model` | `ProviderId` / `ModelId` / `ApiVersion` 三个独立字符串新类型；`CapabilitySupport` 四态；`ModelCapabilities` 默认 `Unknown` |
+| `http` | `HttpRequest` / `HttpResponse` 数据结构与 `http` 类型 re-export，不含客户端 |
+| `json` | `RawJson`（`Box<RawValue>`）与 `parse_raw` / `raw_from_value`、`RawExtension`、`Extensions`（`BTreeMap`）、`JsonMode` 四态；`Canonical` 显式返回未实现错误 |
+| `stream::buffer` | 字节 → 行：LF / CRLF / 单 CR、跨 chunk `CR` 等待、UTF-8 整行校验、BOM 跳过 |
+| `stream::sse` | 字段语法（`event` / `data` / `id` / `retry` / 注释 / 无冒号行）与 `RawEvent` |
+| `stream::decoder` | 事件装配：多行 data、空 data 不分发、`last_event_id`、`finish()` 区分完成与截断 |
+| `stream::json_accumulator` | 增量结构判定（`Empty` / `Incomplete` / `Complete` / `Malformed`）、只扫描增量、不完整时给出明确状态 |
+| `stream::status` | `StreamStatus` 五态，`Incomplete` 与 `Failed` 分离 |
+
+测试：60 个用例（57 单元 + 3 集成），覆盖 SSE 在 1..N 每个字节边界切分、UTF-8 跨 chunk、CRLF/CR、BOM、截断流、增量 JSON 的逐字节切分与非法尾随内容。已通过 `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`./scripts/check-deps.sh` 与 wasm32 编译。
+
+暂缓：`json::canonical`（RFC 8785 JCS，M9）、真实 API fixtures（随 M3 起进入）。
+
+下一步 **M2**：`airx-transport` 的 `Transport` trait → Mock → native(reqwest) → 字节流读取 → 错误映射与 `ResponseMetadata` → 超时/取消 → `retry` / `middleware`。
 
 ---
 

@@ -42,8 +42,8 @@ dbg_macro = "deny"
 todo = "warn"
 unimplemented = "warn"
 
-# M0 阶段各 crate 尚无实现，依赖按白名单预先声明；
-# 对应模块落地（M1 起）后移除本段，让 lint 恢复拦截真实的无用依赖。
+# 各 crate 尚未全部落地，依赖按白名单预先声明；
+# 对应模块实现后移除本段，让 lint 恢复拦截真实的无用依赖。
 [workspace.lints.cargo]
 unused_dependencies = "allow"
 

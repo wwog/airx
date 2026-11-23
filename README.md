@@ -28,4 +28,5 @@ cargo check -p airx --target wasm32-unknown-unknown \
 
 ## 状态
 
-M0（Workspace 接线）完成。下一步 M1：`airx-core` 的 `error` / `model` / `http` / `json` / `stream`。
+M0（Workspace 接线）与 M1（`airx-core` 契约层）已完成，60 个测试通过。
+下一步 M2：`airx-transport` 的 `Transport` trait、Mock、native、流式读取与重试。
