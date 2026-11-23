@@ -10,6 +10,7 @@
 pub mod common;
 pub mod config;
 pub mod generate_content;
+pub mod models;
 
 pub use common::{GeminiErrorBody, GeminiErrorResponse, SafetyRating, UsageMetadata};
 pub use config::GeminiConfig;

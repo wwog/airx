@@ -10,7 +10,7 @@ use std::fmt;
 
 use airx_core::AirxError;
 use airx_core::error::ConfigurationError;
-use airx_core::http::{HeaderMap, HeaderName, HeaderValue, Uri};
+use airx_core::http::{HeaderMap, HeaderName, HeaderValue, HttpRequest, Uri, header};
 
 use crate::internal::url::{endpoint_path, endpoint_uri};
 
@@ -142,6 +142,43 @@ impl OpenAiConfig {
     pub(crate) fn endpoint_uri(&self, path: &str, label: &str) -> Result<Uri, AirxError> {
         endpoint_uri(&self.base_url, path, &format!("OpenAI {label}"))
     }
+
+    /// 写入认证、组织 / 项目与 Provider 级默认 Header。
+    pub(crate) fn apply_headers(&self, http: &mut HttpRequest) -> Result<(), AirxError> {
+        let authorization = format!("Bearer {}", self.api_key);
+        http.headers.insert(
+            header::AUTHORIZATION,
+            header_value(&authorization, "api_key")?,
+        );
+
+        if let Some(organization) = self.organization() {
+            http.headers.insert(
+                HeaderName::from_static("openai-organization"),
+                header_value(organization, "organization")?,
+            );
+        }
+
+        if let Some(project) = self.project() {
+            http.headers.insert(
+                HeaderName::from_static("openai-project"),
+                header_value(project, "project")?,
+            );
+        }
+
+        for (name, value) in &self.default_headers {
+            http.headers.insert(name.clone(), value.clone());
+        }
+
+        Ok(())
+    }
+}
+
+fn header_value(value: &str, field: &str) -> Result<HeaderValue, AirxError> {
+    HeaderValue::from_str(value).map_err(|error| {
+        AirxError::Configuration(ConfigurationError::new(format!(
+            "OpenAI {field} 无法作为 HTTP Header: {error}"
+        )))
+    })
 }
 
 impl fmt::Debug for OpenAiConfig {

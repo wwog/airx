@@ -18,7 +18,7 @@
 | `airx` | Client 构建入口 / Provider 客户端 / typed endpoint / prelude |
 
 依赖严格单向：`airx → {core, protocol, transport}`，`protocol/transport → core`。
-完整设计与决策见 [docs/architecture.md](docs/architecture.md)，协议覆盖见
+当前实现架构见 [docs/architecture.md](docs/architecture.md)，协议覆盖见
 [docs/protocol-support.md](docs/protocol-support.md)，兼容规则见 [docs/compatibility.md](docs/compatibility.md)。
 
 ## 快速开始
@@ -77,6 +77,65 @@ let response = gemini
 println!("{}", response.text());
 # Ok::<(), AirxError>(())
 ```
+
+## SDK 体验
+
+单次请求选项与响应元数据：
+
+```rust,ignore
+let chat = client.chat().with_options(
+    RequestOptions::new()
+        .try_header("x-trace-id", "trace-1")?
+        .idempotency_key("idem-1"),
+);
+
+let response = chat.create_with_meta(request).await?;
+println!("status={} request_id={:?}",
+    response.meta.status,
+    response.meta.request_id);
+let data = response.data;
+```
+
+流式：`ProtocolStream` 实现 `futures_core::Stream`，并提供一次性收尾：
+
+```rust,ignore
+use futures_util::TryStreamExt;
+
+let mut stream = client.chat().stream(request).await?;
+while let Some(event) = stream.try_next().await? {
+    // 增量消费
+}
+
+// 或直接拿到聚合结果
+let text = client.chat().stream(request).await?.final_text().await?;
+```
+
+结构化输出、模型列表与计 token：
+
+```rust,ignore
+let openai = Client::openai().api_key("...").build()?;
+let anthropic = Client::anthropic().api_key("...").build()?;
+
+let parsed: MyType = openai.chat().parse_as(request).await?;
+
+let models = openai.models().list().await?;
+
+let page = anthropic
+    .models()
+    .list(AnthropicListModelsRequest::builder().limit(20).build())
+    .await?;
+
+let tokens = anthropic
+    .messages()
+    .count_tokens(CountTokensRequest::builder()
+        .model("claude-sonnet-4-5")
+        .user("hi")
+        .build()?)
+    .await?;
+```
+
+默认策略对齐官方 SDK：native 2 次重试、10 秒连接超时、`User-Agent: airx/<version>`；
+整体请求超时默认关闭，避免截断长流。`RequestOptions` 可临时覆盖 Header 与幂等键。
 
 ## Feature
 
@@ -166,10 +225,11 @@ DEEPSEEK_API_KEY=sk-... cargo run -p airx --example deepseek_json
   OpenAI `max_tokens` 已弃用。DeepSeek 是 OpenAI / Anthropic 兼容部署，不设独立协议，
   结构化输出走 JSON mode（`response_format=json_object`）。对齐基准与来源见
   [docs/protocol-support.md](docs/protocol-support.md) 与 [docs/compatibility.md](docs/compatibility.md)。
-- Gemini 当前覆盖 `generateContent` / `streamGenerateContent`；`countTokens`、
-  模型列表与 Vertex AI 专用参数尚未封装，可用 Raw 扩展字段或原生 `Endpoint` 逃生通道。
+- Gemini 覆盖 `generateContent` / `streamGenerateContent` / `countTokens` / 模型列表；
+  Vertex AI 专属参数与 Live API 尚未封装，可用 Raw 扩展字段或原生 `Endpoint` 逃生通道。
   Gemini 流没有 `[DONE]` 哨兵，聚合器以 `finishReason`（或 `promptFeedback.blockReason`）
   判定完成，缺失时返回 `Incomplete`。
+- 文件、批处理、Embeddings、图片/音频等平台接口尚未封装。
 - 服务端联网工具（OpenAI `web_search`、Anthropic `web_search` / `web_fetch`、DeepSeek
   `deepseek_web_search`）由 Provider 后台执行；airx 只声明工具并解析引用/调用记录，
   不代发本地网络请求。

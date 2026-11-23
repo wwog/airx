@@ -1,521 +1,164 @@
-# airx 架构设计
+# airx 架构（当前实现）
 
 > One Rust SDK. Multiple AI protocols. No feature loss.
 
-本文是 airx 的**唯一架构基准文档**，作为后续实现、评审与扩展的默认依据；与代码冲突时以本文为准，修改架构需先修改本文。
-
-文档组织顺序即设计推演顺序：**功能需求 → 设计原则 → 分层与包职责 → 接口契约 → 关键横切设计 → 交付与质量**。
-
----
-
-## 目录
-
-1. [产品定位与设计目标](#1-产品定位与设计目标)
-2. [功能需求](#2-功能需求)
-3. [核心架构决策](#3-核心架构决策)
-4. [Workspace 与依赖关系](#4-workspace-与依赖关系)
-5. [分层与包职责](#5-分层与包职责)
-6. [关键接口契约](#6-关键接口契约)
-7. [关键横切设计](#7-关键横切设计)
-8. [对外 API 与 Feature](#8-对外-api-与-feature)
-9. [质量保障](#9-质量保障)
-10. [实施路线](#10-实施路线)
-11. [当前状态](#11-当前状态)
-12. [附录：决策速查与被否决方案](#12-附录决策速查与被否决方案)
+本文根据仓库**当前代码**整理，描述已经落地的分层、契约与运行时行为，不是路线图或设计提案。
+与代码冲突时以代码为准。协议能力清单见 [protocol-support.md](protocol-support.md)，
+跨 Provider 的显式行为约定见 [compatibility.md](compatibility.md)。
 
 ---
 
-## 1. 产品定位与设计目标
+## 1. 定位与实现约束
 
-### 1.1 定位
+airx 是**多协议原生 API 客户端库**。它不提供跨 Provider 的统一请求 / 响应模型，
+而是为每个原生 API 保留独立的强类型请求、响应、事件与错误形状。
 
-airx 不是一个“统一的 LLM 请求库”，而是**多协议 AI API 基础设施库**。
+当前实现覆盖：
 
-它服务需要**协议完整能力**的应用：使用各 Provider 的 Native API，
-并在需要时下探到 Raw JSON 与自定义 Transport。airx 不提供跨 Provider 的统一请求模型：
-统一抽象会系统性丢失事件、内容块与工具语义，协议差异必须在各自模块内完整表达。
-
-### 1.2 设计目标
-
-| 编号 | 目标 | 说明 |
-| --- | --- | --- |
-| G1 | 协议完整性 | 完整覆盖 OpenAI Responses、Chat Completions、Anthropic Messages、Gemini generateContent，不丢失任何原生能力 |
-| G2 | 协议保真 | 原生模型不得成为使用协议能力的阻碍；无法建模的字段、事件与内容块必须保留或明确报错 |
-| G3 | 高性能 | 减少不必要分配与 JSON 往返；支持流式解析与背压 |
-| G4 | 函数式核心 | 转换、编解码、聚合均为纯函数；副作用集中在边界层 |
-| G5 | 可扩展 | 新增 Provider 不改核心领域模型；第三方可扩展协议、Transport、JSON 策略 |
-| G6 | 跨平台 | Native 与 `wasm32-unknown-unknown` 均可编译、可测试 |
-| G7 | 长期可维护 | crate 边界清晰、单向依赖、公共 API 稳定、模块可独立测试 |
-
-### 1.3 三条不可妥协的原则
-
-1. **Native First**：每个协议拥有完整、独立的强类型模型，不经过任何统一中转。
-2. **No Silent Loss**：任何未建模的参数、事件、内容块都必须能保留（Raw JSON / Unknown 变体 / 扩展字段）或明确报错。禁止静默丢弃 Thinking、Tool Call、多模态内容。
-3. **Effects at the Edge**：协议处理、JSON 转换、事件聚合是纯函数；网络、时钟、重试等待、日志才是副作用。
-
-### 1.4 非目标
-
-- 不做运行时 Provider 插件市场（只保留编译期扩展点与动态注册的轻量接口）。
-- 不内建 Prompt 编排、Agent 框架、RAG、向量库。
-- 不承诺“一个请求结构体打穿所有 Provider”。
-- 不为追求零拷贝而牺牲公共 API 的可读性（见 §7.1）。
-
----
-
-## 2. 功能需求
-
-需求编号在测试与 PR 中可直接引用，作为验收锚点。优先级：P0 = 首个可用版本必须完成，P1 = 稳定版，P2 = 后续演进。
-
-### 2.1 协议完整性
-
-| 编号 | 需求 | 验收要点 | 优先级 |
-| --- | --- | --- | --- |
-| FR-P1 | OpenAI Responses | Request / Response / Input·Output **Item 生命周期** / 语义事件（`response.output_item.added`、`response.output_text.delta`、`response.function_call_arguments.delta` 等）/ 工具调用 / Structured Outputs / 多模态 / 状态 | P0 |
-| FR-P2 | OpenAI Chat Completions | Request / Response / `chunk`+`delta` 流模型 / `tool_calls` / usage / 多模态 | P0 |
-| FR-P3 | Anthropic Messages | Request / Response / Content Block 全类型 / Thinking 与 Redacted Thinking / Tool Use 与 Tool Result / Prompt Caching / Structured Outputs / `message_start`…`message_stop` 事件 | P1 |
-| FR-P4 | DeepSeek 兼容部署 | 通过 OpenAI / Anthropic 兼容端点接入，不新增协议模块；JSON mode 差异由示例与文档说明 | P1 |
-| FR-P7 | Gemini generateContent | `contents` / `parts` 全类型 / `systemInstruction` / `generationConfig` / tools 与 `toolConfig` / `safetySettings` / `usageMetadata` / `alt=sse` 流与聚合 | P0 |
-| FR-P5 | 未知内容保留 | 未知字段、未知事件、未知 Content Block 均可原样保留并可重新序列化 | P0 |
-| FR-P6 | 协议可扩展 | 第三方能新增协议模块，无需修改 `airx-core` | P2 |
-
-Responses 与 Chat Completions 必须是两个独立协议模块。二者事件模型不同（语义事件 vs chunk/delta），不能共用 `StreamChunk`。
-
-### 2.2 流式
-
-| 编号 | 需求 | 验收要点 | 优先级 |
-| --- | --- | --- | --- |
-| FR-S1 | SSE 语法完整 | `data:` / `event:` / `id:` / `retry:`、多行 data、CRLF 与 LF、注释行、UTF-8 跨 buffer 边界、EOF、网络中断 | P0 |
-| FR-S2 | 原生事件强类型 | 每个协议拥有独立 `Event` 枚举，不做 `String` 直通、不压成通用 chunk | P0 |
-| FR-S3 | 事件聚合 | 独立 `StreamAccumulator`；`finish()` 必须区分 Completed / Failed / Incomplete / Cancelled | P0 |
-| FR-S4 | 增量 JSON | Tool 参数 delta 可累积，支持“是否已完整”判断，不完整不提前报错 | P0 |
-| FR-S5 | 取消与背压 | 用户提前 drop 流即停止读取，不在后台跑完；错误携带流状态 | P0 |
-| FR-S6 | `[DONE]` 处理 | 属于协议约定，由 Provider Decoder 处理，不写入 SSE 语法层 | P0 |
-
-### 2.3 JSON 保真
-
-| 编号 | 需求 | 验收要点 | 优先级 |
-| --- | --- | --- | --- |
-| FR-J1 | 四种表示并存 | 强类型 struct / `serde_json::Value` / `RawValue` / `Bytes`，按场景选型 | P0 |
-| FR-J2 | 未知字段双向保留 | 反序列化保留 + 重新序列化可写回，顺序不假设为协议语义 | P0 |
-| FR-J3 | 字节级保真 | 签名、代理转发、特殊 Provider 场景可保留原始字节 | P1 |
-| FR-J4 | 确定性序列化 | Canonical 模式，供测试、缓存 Key、签名使用（预留 RFC 8785 JCS） | P1 |
-| FR-J5 | 格式化模式 | `Compact` / `Pretty` / `Preserve` / `Canonical` 四态 | P1 |
-| FR-J6 | Provider quirks 隔离 | `max_tokens` / `max_completion_tokens` / `max_output_tokens`、`response_format` vs `text.format`、`tool_choice` 差异等，只存在于对应协议模块 | P0 |
-| FR-J7 | Raw 逃生通道 | 用户可在请求与响应两个方向注入/取回原始 JSON，不必等 SDK 发版 | P1 |
-
-必须区分的三个概念（不可混为一谈）：**JSON 语义保真**、**未知字段保留**、**JSON 字节级保真**。
-
-### 2.4 Gemini 协议
-
-| 编号 | 需求 | 验收要点 | 优先级 |
-| --- | --- | --- | --- |
-| FR-G1 | 模型路径 | `/models/{model}:generateContent`；裸模型名与 `models/…` 均可用，非法字符明确报错 | P0 |
-| FR-G2 | Part 全类型 | text（含 thought / thoughtSignature）/ inlineData / fileData / functionCall / functionResponse / executableCode / codeExecutionResult；未知 Part 保留 | P0 |
-| FR-G3 | 生成配置 | `generationConfig` 全量字段 + `thinkingConfig`（budget / level）；未知字段透传 | P1 |
-| FR-G4 | 流式完成语义 | 无 `[DONE]`；以 `finishReason` / `blockReason` 判定完成，缺失报 `Incomplete` | P0 |
-| FR-G5 | 安全拦截 | HTTP 200 + `promptFeedback.blockReason` 是正常响应，不得当作错误或完成内容 | P1 |
-
-### 2.5 传输与平台
-
-| 编号 | 需求 | 验收要点 | 优先级 |
-| --- | --- | --- | --- |
-| FR-T1 | 可替换 Transport | 协议实现不出现 `reqwest::Client`；替换 Transport 不改协议代码 | P0 |
-| FR-T2 | Native HTTP | Reqwest；TLS 后端可选（native-tls / rustls）；连接池、代理 | P0 |
-| FR-T3 | WASM Fetch | `wasm32-unknown-unknown` 可用，不强制 Future 为 `Send` | P1 |
-| FR-T4 | Mock Transport | 单元测试与 golden 测试可用 | P0 |
-| FR-T5 | 执行策略 | 超时、取消、Middleware、幂等感知的重试 | P1 |
-| FR-T6 | 流式响应体 | 字节流读取 + 背压，不整包缓冲 | P0 |
-| FR-T7 | 配置可覆盖 | `base_url`、Header 可覆盖（兼容代理/网关/兼容 API）；敏感 Header 不落日志 | P0 |
-| FR-T8 | HTTP 元数据保留 | status / headers / request_id 可被用户读取 | P0 |
-
-### 2.6 错误与可观测
-
-| 编号 | 需求 | 验收要点 | 优先级 |
-| --- | --- | --- | --- |
-| FR-O1 | 统一错误分类 + 原始信息 | 保留 provider、status、code、message、request_id、raw body；400/429/500 不被折叠成同一个错误 | P0 |
-| FR-O2 | 重试判定信息 | Retryable、Retry-After、限流信息可读 | P1 |
-| FR-O3 | 可观测 | `tracing` 结构化诊断；可选 metrics 钩子；可脱敏 | P2 |
-
-### 2.7 工程质量
-
-| 编号 | 需求 | 验收要点 | 优先级 |
-| --- | --- | --- | --- |
-| FR-Q1 | 单向依赖 | 无循环依赖，禁止反向依赖（§4.3） | P0 |
-| FR-Q2 | 跨平台可验证 | Linux / macOS / Windows / wasm32 编译矩阵 | P1 |
-| FR-Q3 | Golden fixtures | 真实协议样例驱动序列化、反序列化、事件、转换测试 | P0 |
-| FR-Q4 | Feature 组合可控 | 默认 feature 少；不默认引入全部 Provider 与大型 HTTP 依赖 | P1 |
-| FR-Q5 | API 稳定性 | 公共 API 有版本策略；MSRV 明确（1.85+，edition 2024） | P2 |
-
-### 2.8 需求 → 分层归属（追溯矩阵）
-
-| 需求域 | 主责 crate | 主要模块 | 协作方 |
-| --- | --- | --- | --- |
-| FR-P1 / P2 / P3 / P4 / P7 | `airx-protocol` | `openai::responses`、`openai::chat`、`anthropic::messages`、`gemini::generate_content`；DeepSeek 复用兼容端点 | core（类型/JSON/SSE 语法）、airx（编排） |
-| FR-P5 / FR-J2 / FR-J3 / FR-J7 | `airx-core` | `json::*`、`extension` | protocol（字段声明） |
-| FR-P6 | `airx-protocol` | `extension`、`internal::codec` | core（数据契约） |
-| FR-S1 / FR-S6 | `airx-core` | `stream::sse`、`stream::decoder` | — |
-| FR-S2 | `airx-protocol` | `<provider>/<api>/event` | core（SSE 输出） |
-| FR-S3 | `airx-protocol`（状态机） + `airx-core`（`StreamStatus`） | `accumulator` | airx（驱动） |
-| FR-S4 | `airx-core` | `stream::json_accumulator` | protocol（tool 参数） |
-| FR-S5 | `airx-transport`（读取与取消） + `airx`（生命周期） | `stream`、`retry` | core（状态） |
-| FR-J1 / J4 / J5 | `airx-core` | `json::raw`、`json::canonical` | — |
-| FR-J6 | `airx-protocol` | `internal::json_policy`、`<provider>::compatibility` | core（工具函数） |
-| FR-G1 ~ G5 | `airx-protocol` | `gemini::config`、`gemini::generate_content::{content,request,response,tool,generation,endpoint,accumulator}` | airx（Provider 入口）、core（SSE） |
-| FR-T1 / T2 / T3 / T4 / T5 / T6 | `airx-transport` | `transport`、`native`、`wasm`、`retry`、`middleware`、`stream` | core（HTTP 数据结构） |
-| FR-T7 / T8 | `airx-protocol`（Provider 配置与 Header） + `airx-transport`（响应元数据） | `config`、`response` | airx（Builder） |
-| FR-O1 / O2 | `airx-core`（错误形状） + `airx-protocol`（错误体解析） + `airx-transport`（后端错误映射） | `error` | airx（re-export） |
-| FR-O3 | `airx-transport` | `middleware`、`tracing` span | airx（钩子） |
-| FR-Q1 ~ Q5 | 全部 | Workspace 根配置、`tests/`、`examples/` | CI |
-
----
-
-## 3. 核心架构决策
-
-### 3.1 决策表
-
-| 设计问题 | 决策 | 理由 |
-| --- | --- | --- |
-| 整体架构 | **Protocol-First** | 协议差异是本质差异，抽象必须后置 |
-| 核心设计 | **Functional Core / Imperative Shell** | 纯函数可测、可组合；副作用集中在传输层 |
-| Provider 扩展 | **独立协议模块** | 每个 Provider × API 的请求、响应、事件各自建模，互不共享类型 |
-| crate 数量 | **4 个** | crate 边界对应稳定架构职责，模块边界对应功能 |
-| Native API | 独立强类型模型，按 Provider × API 分模块 | 保证完整性 |
-| JSON | Serde + `RawValue` + `Value` + `Bytes` | 四种保真需求不同 |
-| Stream | SSE 解析一次 + 各协议独立事件 | 事件语义不可通用化 |
-| 聚合 | 独立 Accumulator | 用户可选择增量/聚合/自管状态 |
-| IO | 可替换 Transport，协议层零 HTTP 依赖 | 可测试、可 WASM、可代理 |
-| WASM | 同一 crate，target-specific 实现 + feature | 不新增 crate，不污染抽象 |
-| Async | 原生 `async fn` + 静态泛型分发 | 避免全量 `Box<dyn Future>` |
-| 动态扩展 | 扩展字段命名空间 + Raw JSON | 新功能不必等发版 |
-| 错误 | 统一分类 + 原始信息保留 | 可分类处理，也可排查 |
-| 测试 | Golden Fixtures + Protocol/流式矩阵 | 主要风险是协议演进，不是业务逻辑 |
-
-### 3.2 为什么是 4 个 crate
-
-crate 边界 = **稳定的架构职责 + 独立版本/发布需要**；模块边界 = **功能划分**。
-
-把 JSON、SSE、每个 Provider、Retry 都拆成独立 crate，在职责划分上并没有错，但它们之间**没有独立的演进节奏**，硬拆会带来：
-
-- 版本号与 feature 组合的矩阵爆炸（Cargo features 是 additive 的，跨 crate 合并极易产生意外依赖）。
-- 公共 API 被迫暴露在细粒度 crate 上，后期合并是 breaking change。
-- 纯内部模块被固化成一等公民，反而限制重构。
-
-因此采取**默认不拆**的策略：JSON、Stream、Retry、各 Provider 协议全部保留为模块边界，只有在出现明确的独立发布或独立版本管理需求时才拆出 crate。
-
-以此得到 4 个 crate，每个对应一个不会随功能增删而改变的架构职责：`airx-core`（基础）、`airx-protocol`（协议）、`airx-transport`（IO）、`airx`（组合入口）。
-
-### 3.3 分层模型
-
-```text
-┌──────────────────────────────────────────────────────────────┐
-│ L3  airx            Facade / Client / Builder / Prelude      │  组合根
-├───────────────────────────────┬──────────────────────────────┤
-│ L2  airx-protocol             │  airx-transport              │  两个平行层
-│     原生协议模型 + 纯编解码     │  HTTP / SSE IO / Retry       │
-├───────────────────────────────┴──────────────────────────────┤
-│ L1  airx-core       Error / Model / JSON / SSE / HTTP 数据结构 │  基础层
-└──────────────────────────────────────────────────────────────┘
-```
-
-关键点：**Protocol 与 Transport 是兄弟层，互不依赖**。
-
-一种直觉做法是让协议层直接依赖传输实现（`airx-protocol → airx-transport`）。airx 不采用，而让二者只共享 `airx-core` 中的**数据契约**（`HttpRequest` / `HttpResponse` / `RawEvent`）。原因：
-
-- 编码是纯函数，可以被单独测试，也可以在无网络环境做 golden 校验。
-- Transport 可整体替换（Reqwest / WASM Fetch / Mock / 自建代理），协议代码零改动。
-- 消除“协议模块为了拿 HTTP 类型而拉入 reqwest”的隐式耦合。
-
-### 3.4 明确不做的事
-
-| 被否决做法 | 原因 |
+| Provider | API |
 | --- | --- |
-| 单一 `Provider` trait + 统一 `CompletionRequest` / `CompletionResponse` | 会系统性丢失事件模型、工具语义、内容结构与状态管理 |
-| 一个 `OpenAIRequest` 同时覆盖 Responses 与 Chat | 二者 item 生命周期与事件语义不同 |
-| 通用 `StreamChunk` 承载所有流 | 事件信息被压扁，无法还原原生能力 |
-| 把所有 payload 都转成 `serde_json::Value` | 丢失数字/字符串原始表示、字段顺序与字节保真 |
-| 在 core 里写 `if provider == DeepSeek` | Provider 差异必须收敛在各自协议模块 |
-| 全量 `Box<dyn Future>`、自建 Monad / Effect System | Rust 的 `Result`/`Option`/Iterator/enum/所有权已足够 |
-| 强制所有 Future `Send + Sync` | WASM 上不可行，会迫使跨平台设计妥协 |
-| 发送前先转通用模型再转回原生模型 | 无谓往返且必然丢字段；原生请求直发 |
-| 把 `[DONE]` 当作 SSE 通用语法 | 它是协议约定，属于 Provider Decoder |
-| 默认对所有失败自动重试 | 非幂等请求会重复产生副作用 |
+| OpenAI | Chat Completions、Responses |
+| Anthropic | Messages |
+| Gemini | `generateContent`、`streamGenerateContent` |
 
----
+DeepSeek 不是独立协议模块，而是通过“同一协议客户端 + `base_url`”接入的兼容部署
+（OpenAI-Compatible / Anthropic-Compatible）。
 
-## 4. Workspace 与依赖关系
+实现层面的三条硬约束：
 
-### 4.1 目录结构
+1. **Native First**：每个协议拥有完整、独立的数据模型，不经过统一中转。
+2. **No Silent Loss**：未建模字段进入 `extensions`，未知事件 / 内容块保留为
+   `Unknown(Value)` / `Other(Value)`，不静默丢弃。
+3. **Effects at the Edge**：编码、解码、SSE 语法、事件聚合都是纯函数；
+   网络 IO 只存在于 `airx-transport`。
 
-当前仓库已按此结构建立骨架；标 `*` 的为规划中、尚未实现的模块。
+crate 级约束：
 
-```text
-airx/
-├── Cargo.toml                 # workspace 根：members / workspace.package / workspace.dependencies
-├── Cargo.lock
-├── rust-toolchain.toml        # 固定工具链通道（target 显式安装）
-├── rustfmt.toml
-├── clippy.toml*
-├── deny.toml*                 # 依赖许可与安全审计（M9 接入）
-├── README.md
-│
-├── crates/
-│   ├── airx/                  # L4 门面
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── client.rs      # 构建入口：Client::openai/anthropic/gemini
-│   │       ├── builder.rs     # 配置聚合
-│   │       ├── executor.rs    # 执行级默认 Header + Transport
-│   │       ├── openai.rs      # OpenAI typed endpoint 入口
-│   │       ├── anthropic.rs   # Anthropic typed endpoint 入口
-│   │       ├── gemini.rs      # Gemini typed endpoint 入口
-│   │       ├── prelude.rs
-│   │       └── stream.rs      # ProtocolStream
-│   │
-│   ├── airx-core/             # L1 基础层
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── error.rs
-│   │       ├── model.rs       # ProviderId / ModelId / ApiVersion
-│   │       ├── extension.rs   # RawExtension / Extensions
-│   │       ├── json/
-│   │       │   ├── mod.rs
-│   │       │   ├── raw.rs
-│   │       │   ├── value.rs
-│   │       │   ├── canonical.rs*   # M9：RFC 8785 JCS
-│   │       │   └── format.rs
-│   │       ├── stream/
-│   │       │   ├── mod.rs
-│   │       │   ├── sse.rs
-│   │       │   ├── decoder.rs
-│   │       │   ├── buffer.rs
-│   │       │   ├── status.rs
-│   │       │   └── json_accumulator.rs
-│   │       └── http.rs        # 仅数据结构，不含客户端
-│   │
-│   ├── airx-protocol/         # L2 原生协议层（纯函数）
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── extension.rs
-│   │       ├── internal/
-│   │       │   ├── codec.rs       # 共享编解码辅助
-│   │       │   ├── json_policy.rs # Provider JSON 策略
-│   │       │   └── serde_helpers.rs
-│   │       ├── openai/
-│   │       │   ├── mod.rs
-│   │       │   ├── config.rs
-│   │       │   ├── common/        # model / usage / error / tool
-│   │       │   ├── responses/     # request / response / input / output / item / event / stream / endpoint
-│   │       │   └── chat/          # request / response / message / chunk / tool / event / stream
-│   │       ├── anthropic/
-│   │       │   ├── mod.rs
-│   │       │   ├── config.rs
-│   │       │   ├── common/
-│   │       │   └── messages/      # request / response / content / tool / thinking / event / stream / accumulator
-│   │       └── gemini/
-│   │           ├── mod.rs
-│   │           ├── config.rs      # x-goog-api-key / base_url
-│   │           ├── common.rs      # error / usage / safety rating
-│   │           └── generate_content/  # content / request / response / tool / generation / endpoint / accumulator
-│   │
-│   ├── airx-transport/        # L2 副作用层
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── transport.rs   # Transport trait / BoxFuture（对象安全）
-│   │       ├── native.rs      # Reqwest 实现 + 错误映射
-│   │       ├── mock.rs        # 可脚本化 Mock（响应队列 + 请求记录）
-│   │       ├── wasm.rs        # Fetch 实现（含 ReadableStream）
-│   │       ├── response.rs    # HttpStreamResponse / ResponseMetadata
-│   │       ├── stream.rs      # ByteStream
-│   │       ├── retry.rs       # RetryPolicy + RetryTransport
-│   │       └── middleware.rs  # 同步中间件链
-│   │
-├── tests/                     # 协议与端到端测试（实际位于各 crate tests/）
-│   ├── fixtures/
-│   │   ├── openai/{responses,chat}/
-│   │   ├── anthropic/messages/
-│   │   └── gemini/generate/
-│   ├── protocol.rs
-│   ├── serialization.rs
-│   └── streaming.rs
-│
-├── examples/                  # 独立示例 crate（如 deepseek-agent）
-├── scripts/
-│   └── check-deps.sh          # 依赖方向校验（本地与 CI 共用）
-├── .github/workflows/ci.yml   # fmt / clippy / test / 依赖方向 / wasm
-└── docs/
-    ├── architecture.md        # 本文
-    ├── protocol-support.md
-    └── compatibility.md
-```
-
-### 4.2 依赖 DAG
-
-```text
-airx                     (组合根：唯一推荐给用户的入口)
- ├── airx-core
- ├── airx-protocol
- └── airx-transport
-
-airx-protocol
- └── airx-core
-
-airx-transport
- └── airx-core
-```
-
-协议与传输是兄弟层：`airx` 是唯一的组合根，负责把编码结果交给传输执行，再把响应交回协议解码。
-
-### 4.3 依赖规则
-
-必须成立：
-
-- `airx-core` 不依赖任何其他 workspace crate，也不知道 OpenAI / Anthropic / Gemini 的存在。
-- `airx-protocol` 只依赖 `airx-core`；不依赖传输实现的 crate。
-- `airx-transport` 只依赖 `airx-core`；不知道什么是 Responses / Messages / Gemini。
-- `airx` 依赖以上全部，负责组装。
-
-禁止出现：
-
-```text
-airx-core      -> airx-protocol        # 基础层反向依赖
-airx-protocol  -> airx-transport       # 协议层绑定传输实现
-airx-openai    -> airx-anthropic       # Provider 之间互依赖（同 crate 内也不允许跨协议引用）
-```
-
-CI 通过 `scripts/check-deps.sh`（基于 `cargo metadata`）校验依赖方向；许可与安全审计由 `deny.toml` 在 M9 接入。
-
----
-
-## 5. 分层与包职责
-
-统一约定每个 crate 必须写明**负责**、**不负责**、**模块归属**。判断标准：如果一段代码**只依赖 std / 通用库**且**没有 IO**，且**与某 Provider 语义无关**，它属于 core；一旦涉及某个协议字段语义，属于 protocol；一旦触发时间、网络、日志，属于 transport。
-
-### 5.1 `airx-core`（L1，最稳定）
-
-**负责**
-
-- 统一错误类型与错误形状（`AirxError`、`ProviderError`、`TransportErrorKind`）。
-- `ProviderId`、`ModelId`、`ApiVersion` 三个独立字符串新类型。
-- JSON 工具：`RawJson`、`RawExtension`、扩展字段容器、格式化模式、Canonical 序列化。
-- SSE 语法解析与增量 JSON 累积。
-- 通用 HTTP **数据结构**（Method / Url / HeaderMap / Body / Status），不含客户端。
-- 协议无关的流状态（`StreamStatus`）与缓冲。
-- 与协议无关的纯函数工具（字节/UTF-8 边界处理等）。
-
-**不负责**
-
-- 发送 HTTP、读取网络流、重试等待、访问时钟。
-- 任何 Provider 的请求/响应类型。
-- 跨 Provider 的语义归一化。
-- API Key 管理与认证。
-- 记录日志（仅接受可选 `tracing` 事件，不做输出策略）。
-
-**稳定度要求：最高。** 这里每一次破坏性变更都会传导到全部上层。
-
-### 5.2 `airx-protocol`（L2，演进最快、最重要）
-
-**负责**
-
-- 每个 Provider × API 的完整模型：Request、Response、Input/Output Item、Content Block、Tool、Event、Usage、Error。
-- 纯编码：`request -> HttpRequest`（method/path/headers/body + Provider 认证与版本 Header）。
-- 纯解码：`Bytes/RawEvent -> Response/Event`。
-- Provider 配置：`base_url`、认证方式、API Version、Beta Header、默认 Header。
-- Provider 兼容策略：JSON quirks、字段替换、模型差异、参数裁剪。
-- 各协议的 Stream 事件模型与 Accumulator 状态机。
-
-**不负责**
-
-- 任何网络 IO、重试、超时。
-- 跨 Provider 的语义归一化。
-- 记录或决定日志内容。
-
-**组织原则**
-
-- 按 `protocol/api` 二级模块划分，`openai::responses` / `openai::chat` / `anthropic::messages` / `gemini::generate_content` 互不共享类型。
-- 共享仅限 `common/`（model、usage、error、tool 等**语义确实相同**的部分）与 `internal/`（纯辅助函数，不对外）。
-- Provider 是「协议 × 部署配置」：DeepSeek 这类兼容服务通过 OpenAI 或 Anthropic 端点接入，
-  只改 `base_url` / 认证 Header，不新增协议模块，也不在协议层写 provider 分支。
-
-**关于 `ApiProtocol` trait**
-
-不在 crate 层强制所有 API 实现统一 trait。Responses、Chat、Messages 的类型与流生命周期不同，强行抽象会牺牲类型表达。做法：
-
-- 各 API 暴露具体类型与具体 `encode` / `decode` / `decode_event` 函数。
-- 只有在确实具有共同语义的**编排**处（`airx` 中）使用泛型约束，见 §6.4。
-
-### 5.3 `airx-transport`（L2，唯一 IO 层）
-
-**负责**
-
-- `Transport` trait 与请求执行。
-- Native 实现（Reqwest）：连接池、TLS 选择、代理、超时。
-- WASM 实现（Fetch / ReadableStream）。
-- 流式响应体读取与背压。
-- 重试策略执行（含幂等判定、`Retry-After` 解析、退避）。
-- Middleware 链、取消传播、`tracing` span。
-- `ResponseMetadata`（status / headers / request_id）。
-- 把后端错误映射为 core 的错误形状。
-
-**不负责**
-
-- 任何协议知识（不知道 Responses / Messages 是什么）。
-- 协议事件解析（只产出字节或 SSE 原始事件）。
-- Provider 认证 Header 的构造（由 protocol 在编码阶段写入）。
-- 决定重试是否“业务安全”——只依据方法与错误类别的中立规则，协议层可通过标记覆盖。
-
-**平台约束**
-
-- Trait 不默认要求 `Send + Sync`；约束施加在 native 具体实现上。
-- Native/WASM 通过 `cfg(target_arch)` + feature 分离实现，不新增 crate。
-
-### 5.4 `airx`（L3，组合根）
-
-**负责**
-
-- `Client` / `Builder` / 配置合并 / `prelude`。
-- 把 protocol 的编码结果交给 transport 执行，再把响应交回 protocol 解码。
-- 构建即定性：`Client::openai()` / `Client::anthropic()` / `Client::gemini()` 的
-  `build()` 直接返回 `OpenAi` / `Anthropic` / `Gemini` 客户端，后续请求复用同一客户端，
-  不再重复选择 Provider；兼容部署通过对应协议的 `base_url` 接入。
-- Feature 汇总与平台选择（native / wasm）。
-- 对外错误 re-export 与统一文档。
-
-**不负责**
-
-- 重新实现协议、JSON、SSE 逻辑。
-- 存放业务语义（Builder 只做配置，见 §8.4）。
-
-### 5.5 横切职责归属
-
-| 关注点 | 归属 | 说明 |
+| crate | 允许做的事 | 明确不做 |
 | --- | --- | --- |
-| 错误分类与形状 | `airx-core::error` | 上层只做映射，不新增并行错误体系 |
-| 失败重试 | `airx-transport::retry` | 策略 + 执行；协议层只提供幂等提示 |
-| JSON quirk | `airx-protocol::internal::json_policy` + 各 Provider `compatibility` | 绝不进 core |
-| SSE 语法 | `airx-core::stream::sse` | 只认语法，不认 `[DONE]` |
-| 事件语义 | `airx-protocol::<provider>::<api>::event` | — |
-| 流状态 | `airx-core::stream::status` | 各协议复用 |
-| API Version / Beta Header | `airx-protocol::<provider>::config` | 不写死在通用代码 |
-| base_url / 认证 | `airx-protocol::<provider>::config` | 必须可覆盖（代理、网关、兼容 API） |
-| 超时 / 中间件 / TLS | `airx-transport` | 执行配置，与 Provider 配置分离 |
-| 日志与脱敏 | `airx-transport` + `airx` | 敏感 Header 默认不输出 |
-| Raw 透传 | `airx-core::json::raw` + protocol 扩展字段 | 双向可用 |
+| `airx-core` | 错误形状、标识类型、HTTP 数据形状、JSON 保真、SSE 语法 | 任何 IO、任何 Provider 语义 |
+| `airx-protocol` | 强类型模型、URL / Header 构造、编解码、错误体解析、流事件与聚合 | 网络请求、连接池、重试 |
+| `airx-transport` | HTTP 执行、流式读取、超时、重试、中间件、Mock | 认证 Header、Provider 错误解析 |
+| `airx` | 构建入口、Provider 客户端、typed endpoint、执行器、prelude | 协议字段定义、底层 IO 实现 |
 
 ---
 
-## 6. 关键接口契约
+## 2. Workspace 结构与依赖方向
 
-### 6.1 职责三分
+### 2.1 Crate 与依赖图
 
 ```text
-Protocol  描述“如何编码 / 如何解码”       纯函数，无 IO
-Transport 执行“发送 / 读取”              唯一副作用点
-Client    组合二者，管理生命周期与策略    位于 airx
+airx (facade)
+  ├── airx-protocol ──► airx-core
+  ├── airx-transport ─► airx-core
+  └────────────────────► airx-core
 ```
 
-不要让 Provider 实现一个同时包含 HTTP、Stream、JSON、Retry 的巨型 trait。
+- `airx-core` 不依赖任何 workspace crate。
+- `airx-protocol` 和 `airx-transport` 互不依赖，只共享 `airx-core` 的数据契约。
+- `airx` 依赖三者并完成组合。
 
-### 6.2 Protocol 契约
+### 2.2 依赖规则
+
+`scripts/check-deps.sh` 用 `cargo metadata` 校验普通依赖（不校验 dev-dependencies），
+允许的直接依赖为：
+
+```text
+airx-core      → {}
+airx-protocol  → {airx-core}
+airx-transport → {airx-core}
+airx           → {airx-core, airx-protocol, airx-transport}
+```
+
+CI 中该脚本与 `cargo fmt`、`clippy`、`test`、`doc`、feature 组合检查一起运行。
+
+### 2.3 平台依赖
+
+- Native：`airx-transport/native` 引入 `reqwest`，超时/退避使用 `tokio::time`。
+- WASM：`airx-transport/wasm` 引入 `gloo-net`、`wasm-bindgen`、`wasm-streams`、`web-sys`。
+- TLS 后端由 feature 选择：`rustls-tls` 或 `native-tls`。
+
+---
+
+## 3. 运行时链路
+
+### 3.1 构建
+
+```text
+Client::openai()                 // 命名空间 + 执行配置起点
+  .api_key("...")                // Provider 配置
+  .base_url(...) / .chat_path(...)
+  .timeout(...) / .retry_policy(...) / .transport(...)
+  .build()                       // 校验配置、创建 Executor、返回 OpenAi
+```
+
+`Client` 只是入口命名空间；`ClientBuilder` 保存执行级配置（Transport、超时、重试、默认 Header），
+各 Provider 构建器保存协议级配置（API Key、base URL、模式路径、API 版本等）。
+`build()` 把执行配置固化为共享的 `Arc<Executor>`，并返回**已定性的 Provider 客户端**：
+
+| 类型 | 职责 |
+| --- | --- |
+| `OpenAi` | 持有 `Arc<Executor>` + `OpenAiConfig`，入口为 `chat()` / `responses()` / `models()` |
+| `Anthropic` | 持有 `Arc<Executor>` + `AnthropicConfig`，入口为 `messages()` / `models()` |
+| `Gemini` | 持有 `Arc<Executor>` + `GeminiConfig`，入口为 `generate_content(model)` / `models()` |
+| `ApiClient<P>` | 绑定一个端点与执行器，顺序执行 encode → execute → decode |
+| `Executor` | 应用执行级默认 Header，调用可替换的 `Transport` |
+
+Provider 客户端可克隆、可复用；每次调用只克隆协议配置并构造端点，不重建 Transport。
+
+### 3.2 非流式请求
+
+```text
+Chat::create(&request)
+  └─ ApiClient::create
+       1. endpoint.encode(request)  → HttpRequest（URL、认证 Header、JSON body）
+       2. Executor.execute(http)    → Transport::execute
+       3. endpoint.decode(response) → 2xx 反序列化；非 2xx 解析错误体
+```
+
+- 编码失败 → `AirxError::Serialization` / `AirxError::Configuration`。
+- 传输失败 → `AirxError::Transport`。
+- 非 2xx 且可识别 Provider 错误体 → `AirxError::Provider`；否则 `AirxError::Http`。
+- 2xx 解析失败 → `AirxError::Deserialization`。
+
+### 3.3 流式请求
+
+```text
+Chat::stream(&request)              // 门面自动设置 stream = true
+  └─ ApiClient::stream
+       1. endpoint.encode(request)
+       2. Executor.execute_stream   → HttpStreamResponse（状态码 + Header + ByteStream）
+       3. 2xx  → ProtocolStream::new(endpoint, body)
+          非 2xx → 读完 body，构造 HttpResponse 交给 endpoint.decode，返回 Provider/Http 错误
+```
+
+`ProtocolStream::next()` 的循环：
+
+```text
+ProtocolStream
+  └─ SseDecoder::next_event   (字节 → RawEvent)
+       └─ endpoint.decode_event (RawEvent → Option<Event>)
+            ├─ Some(event) → 返回给调用方
+            └─ None        → 协议层可忽略事件（ping 等），继续读
+```
+
+流结束时 `SseDecoder::finish()` 冲刷未分发内容；事件没有以空行闭合时返回
+`StreamErrorKind::Incomplete`，不会被当作正常完成。
+
+### 3.4 逃生通道
+
+- `Chat::endpoint()` / `Responses::endpoint()` / `Messages::endpoint()` /
+  `GenerateContent::endpoint()` 暴露端点，可自行 `encode`。
+- `ApiClient::execute(HttpRequest)` 直接发送预编码请求。
+- 未封装字段通过请求模型的 `extensions` 透传。
+
+---
+
+## 4. 核心契约
+
+### 4.1 Endpoint / StreamingEndpoint
+
+`airx-protocol::endpoint` 只约定编解码，不包含 IO：
 
 ```rust
 pub trait Endpoint {
@@ -525,560 +168,475 @@ pub trait Endpoint {
     fn encode(&self, request: &Self::Request) -> Result<HttpRequest, AirxError>;
     fn decode(&self, response: HttpResponse) -> Result<Self::Response, AirxError>;
 }
+
+pub trait StreamingEndpoint: Endpoint {
+    type Event;
+
+    fn decode_event(&self, event: RawEvent) -> Result<Option<Self::Event>, AirxError>;
+}
 ```
 
-`encode` 产出的 `HttpRequest` 定义在 `airx-core::http`，因此 protocol 无需依赖 transport。
-流式事件解码在 M4 以独立的 `StreamingEndpoint` trait 补充，而不是现在增加未使用的关联类型。
+- 非流式与流式分成两个 trait，只有支持流式的 API 才实现 `StreamingEndpoint`。
+- `decode_event` 返回 `Ok(None)` 表示该事件在协议层可忽略（例如 Anthropic 的 `ping`）。
+- 端点是轻量值类型，持有 Provider 配置（Gemini 还持有模型与调用模式）。
 
-### 6.3 Transport 契约
+### 4.2 Transport
+
+`airx-transport::Transport` 是对象安全的可替换传输：
 
 ```rust
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub trait Transport {
+    fn execute(&self, request: HttpRequest)
+        -> BoxFuture<'_, Result<HttpResponse, TransportError>>;
 
-pub trait Transport: Send + Sync {
-    fn execute(&self, request: HttpRequest) -> BoxFuture<'_, Result<HttpResponse, TransportError>>;
-    fn execute_stream(&self, request: HttpRequest) -> BoxFuture<'_, Result<HttpStreamResponse, TransportError>>;
+    fn execute_stream(&self, request: HttpRequest)
+        -> BoxFuture<'_, Result<HttpStreamResponse, TransportError>>;
 }
 ```
 
-- **对象安全**：`Client` 需要在运行时持有可替换的传输实现，因此方法返回 `BoxFuture`。
-  只有传输边界付出一次装箱，协议与解析仍是纯函数。
-- **不强制 `Send`**：Native 下要求 `Send + Sync`；WASM 下按目标平台去掉该约束
-  （`BoxFuture` 与 trait 均有 `cfg` 版本）。
-- **固定错误形状**：实现只把后端错误映射为 `TransportError`，不引入第二套错误体系。
-- 实现 `&T` 与 `Arc<T>` 的转发，Mock 与自定义 Transport 都可直接交给 Builder。
-- 必须提供 Mock 实现，供单元测试与 golden 测试使用。
+- `BoxFuture` 与 `ByteStream` 在 Native 下要求 `Send`，WASM 下不要求，
+  以适配浏览器 Future / Stream 的约束。
+- `HttpStreamResponse` 即使非 2xx 也保留状态码、Header 与 body 流，
+  错误体由协议层解码，传输层不丢弃内容。
+- `&T` 与 `Arc<T>` 自动实现 `Transport`，便于共享与包装。
 
-### 6.4 组合
+实现：
 
-```rust
-pub struct ApiClient<P> {
-    endpoint: P,
-    executor: Arc<Executor>,   // 持有 Arc<dyn Transport> 与执行级 Header
-}
+| 类型 | 用途 |
+| --- | --- |
+| `ReqwestTransport` | Native HTTP，支持整体超时，可将后端错误映射为 `TransportErrorKind` |
+| `WasmTransport` | 浏览器 Fetch；流式基于 `ReadableStream` |
+| `MockTransport` | 预置响应 / 流 / 错误，记录请求，克隆共享状态 |
+| `RetryTransport<T>` | 应用 `RetryPolicy`（仅非 WASM） |
+| `MiddlewareTransport<T>` | 同步中间件链 |
 
-impl<P: Endpoint> ApiClient<P> {
-    pub async fn create(&self, request: &P::Request) -> Result<P::Response, AirxError>;
-    pub async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, AirxError>; // 逃生通道
-}
-```
+native 默认启用 2 次重试（`RetryPolicy::standard()`），WASM 默认关闭；
+可用 `RetryPolicy::disabled()` 显式关闭。决策：
 
-- 协议端点是**静态泛型**：类型信息不丢失，每个 API 保持自己的 Request / Response。
-- 传输实现通过 `Arc<dyn Transport>` **动态替换**：Builder 可在 Reqwest / Mock / 自定义实现间切换，无需改协议代码。
-- `ApiClient` 位于 `airx`（组合根），保证 protocol 与 transport 不互相依赖。
+| 情况 | 是否重试 |
+| --- | --- |
+| 连接失败（请求未发出） | 任意方法 |
+| 超时 / 5xx | 仅幂等方法 |
+| 429 | 任意方法（含 POST），优先使用 `Retry-After` |
+| 取消 | 不重试 |
+| 流式请求 | 不重试 |
 
-### 6.5 执行流水线
+退避为指数增长并受 `max_backoff` 限制。中间件的 `on_request` 按注册顺序执行，
+`on_response` 按逆序执行；流式请求只执行 `on_request`，不调用 `on_response`。
 
-```text
-Request
-  │
-  ▼
-Authentication        protocol 配置注入（API Key / 版本 / Beta Header）
-  │
-  ▼
-Request Middleware    transport（可选）
-  │
-  ▼
-Retry Policy          幂等感知：连接失败 / 429 / 5xx / 超时 / 非幂等跳过
-  │
-  ▼
-Transport             唯一 IO
-  │
-  ▼
-Response Middleware   transport（可选）
-  │
-  ▼
-Protocol Decoder      protocol（纯函数）
-```
+### 4.3 错误模型
 
-### 6.6 错误契约
+`AirxError` 是统一错误入口，但每个变体保留原始形状：
 
-```rust
-pub enum AirxError {
-    Transport(TransportError),      // 连接、TLS、超时、取消
-    Http(HttpError),                // 非 2xx 且无法解析为 Provider 错误
-    Serialization(SerializationError),
-    Deserialization(DeserializationError),
-    Provider(ProviderError),        // 可识别的 Provider 错误体
-    Stream(StreamError),            // 语法、截断、状态非法
-    Compatibility(CompatibilityError), // Strict 模式下的不可表达
-    Configuration(ConfigurationError),
-}
+| 变体 | 内容 |
+| --- | --- |
+| `Transport(TransportError)` | 连接、超时、TLS、代理、body、取消等；保留 source 链 |
+| `Http(HttpError)` | 非 2xx 且无法解析 Provider 错误体；保留状态码与原始 body |
+| `Serialization(SerializationError)` | 请求序列化失败 |
+| `Deserialization(DeserializationError)` | 响应 / 事件反序列化失败；保留 serde 错误 |
+| `Provider(Box<ProviderError>)` | 可识别的 Provider 错误（装箱避免撑大枚举） |
+| `Stream(StreamError)` | SSE 语法、UTF-8、截断、明确失败、非法状态 |
+| `Configuration(ConfigurationError)` | 客户端配置问题 |
 
-pub struct ProviderError {
-    pub provider: ProviderId,
-    pub status: Option<u16>,
-    pub code: Option<String>,
-    pub message: String,
-    pub request_id: Option<String>,
-    pub raw_body: Option<RawJson>,
-}
-```
+`ProviderError` 保留 `provider`、`status`、`code`、`message`、`request_id`、
+`headers`、`raw_body`。
+`AirxError::is_retryable()` 只做中立判定：连接、超时、429、5xx；
+最终是否重试由传输层结合 HTTP 方法与策略决定。
+`AirxError` 还提供 `request_id()`、`is_rate_limit()`、`retry_after()`、
+`response_headers()` 等访问器，避免调用方重复解析。
 
-依赖约束下的落地方式：错误**形状**定义在 `airx-core`（普通数据结构 + 可选 boxed source，不引用任何后端类型）；`airx-transport` 把 reqwest/gloo 错误映射进来；`airx-protocol` 把错误体解析成 `ProviderError`。上层提供 `is_retryable()`、`retry_after()`、`request_id()` 等判定，但**不把 400 / 429 / 500 折叠为同一错误**。
+### 4.4 JSON 保真
 
-### 6.7 流生命周期契约
-
-```rust
-pub enum StreamStatus {
-    Active,
-    Completed,
-    Failed,
-    Incomplete,
-    Cancelled,
-}
-
-impl StreamAccumulator {
-    pub fn apply(&mut self, event: Event) -> Result<(), AirxError>;
-    pub fn snapshot(&self) -> &StreamState;
-    /// 必须区分正常完成 / 失败 / 不完整
-    pub fn finish(self) -> Result<Response, AirxError>;
-}
-```
-
-- 网络断开**不得**被当作成功完成。
-- 用户 drop 流即取消读取，不在后台继续消费。
-- 聚合逻辑不写在 HTTP Client 内部。
-
----
-
-## 7. 关键横切设计
-
-### 7.1 JSON
-
-**四种表示，按场景选型，不用一种类型硬扛**
+四种表示按场景分工：
 
 | 表示 | 用途 |
 | --- | --- |
-| 强类型 struct | 协议 Request / Response |
-| `serde_json::Value` | 动态字段、未知结构探索 |
-| `RawValue` / `RawJson` | 原样转发、字节级保真 |
-| `Bytes` | 原始网络数据、日志/代理透传 |
+| 强类型 struct | 协议请求 / 响应 / 事件 |
+| `serde_json::Value` | 动态结构、未知块、原始扩展 |
+| `RawJson`（`Box<RawValue>`） | 错误体 / 原样转发，保留原始字节 |
+| `bytes::Bytes` | 网络原始数据 |
 
-**处理流水线**
+- 未知字段统一进入 `Extensions`（`BTreeMap<String, Value>`），通过 `#[serde(flatten)]`
+  双向保留；`BTreeMap` 提供确定顺序，但不代表协议语义。
+- 未知内容块 / 事件使用 `Other(Value)` / `Unknown(Value)`。
+- `JsonMode` 提供 `Compact`、`Pretty`、`Preserve`；`Canonical`（RFC 8785 JCS）
+  尚未实现，调用会返回 `AirxError::Configuration`。
+- 已知保真缺口：`Option<T>` 无法区分 `null` 与字段缺省；需要 null 或字节级保真时
+  使用 `RawJson` 或保留原始响应体。
 
-```text
-Typed Request → Compatibility Transform → Serialize → Transport
-                                                        │
-Raw Response ← Bytes ← Deserialize ← Normalize(可选) ←───┘
-```
+### 4.5 标识类型
 
-- 原生请求**直发**，不经过任何中间模型。
-- 默认公共 API 使用拥有所有权的类型；内部解析器按需借用；高性能场景另给 `*_ref` 接口。
-- 未知字段用显式扩展字段（`Extensions`）或 `RawExtension`，不假设排序是协议语义，不用 `Value` 保证原始字节。
+- `ProviderId`：Provider 标签，只用于错误归属与展示，不决定协议。
+- `ModelId`：模型标识。
+- `ApiVersion`：Provider 接口版本（如 Anthropic `2023-06-01`），影响路径 / Header。
 
-**格式化模式**：`Compact`（请求）、`Pretty`（日志）、`Preserve`（保真）、`Canonical`（确定性，签名/缓存 Key 场景预留 RFC 8785 JCS）。
-
-**兼容差异纯函数化**：Provider 特有的 JSON/参数差异优先用纯函数或静态配置；只有需要用户自定义或运行时注册时才用 trait object。
-
-### 7.2 Stream
-
-三层职责，不可合并：
-
-| 层级 | 职责 | 位置 |
-| --- | --- | --- |
-| SSE 语法 | 事件边界、字段、多行、CRLF、UTF-8 跨 buffer | `airx-core::stream::sse` |
-| 协议事件 | 事件类型、增量语义、`[DONE]`、错误事件 | `airx-protocol::<provider>::<api>::event` |
-| 网络读取 | 字节流、背压、取消 | `airx-transport::stream` |
-
-```text
-HTTP Body Stream → Transport Stream → SSE Decoder → Raw Event
-  → Provider Decoder → Native Event → [可选] Accumulator → Response
-```
-
-要求：
-
-- `ProtocolStream<P>` 按端点泛型化，事件类型由 `P::Event` 决定；不统一成 `Stream<Item = Result<GenericChunk, Error>>`。
-- 解析阶段即完成结构化，不把事件降级为 `String`。
-- `JsonAccumulator` 接收增量字符串、保留原始片段、判断完整性、完成后一次性反序列化；**不对每个 delta 做完整解析**。
-- 支持“只取文本”“只监听工具调用”“自管状态”四种消费姿势。
-
-### 7.3 API Version / Model ID
-
-两个概念必须分离：
-
-| 概念 | 含义 | 归属 |
-| --- | --- | --- |
-| API Version | Provider 接口版本 | `airx-protocol::<provider>::config` |
-| Model ID | 模型标识 | `airx-core::model` |
-
-能力判定不在 SDK 内做静态表：能力取决于模型、API 版本与参数组合，且随官方发布快速变化。
-调用方应依据官方文档与真实请求判断；模型别名与专属参数通过 `extensions` 透传
-（Model Registry 预留）。
-
-### 7.4 配置分层
-
-| 配置类型 | 内容 | 归属 |
-| --- | --- | --- |
-| Provider 配置 | api_key、base_url、模式路径、API version、默认/Beta Header、组织/项目 | `airx-protocol::<provider>::config` |
-| 执行配置 | transport、timeout、retry_policy、default_headers | `airx::config` / `airx-transport` |
-
-`base_url` 必须可覆盖：官方 API、OpenAI Compatible、企业代理、自建服务、第三方 Gateway 都是真实场景。不允许把官方域名硬编码进通用路径构造。
-
-模式路径（OpenAI chat / responses、Anthropic messages）同样有官方默认值，可独立覆盖为
-相对路径或完整 URL。未覆盖时，构建出的客户端在每次 `.chat()` / `.responses()` /
-`.messages()` 调用中复用构建时的配置；`chat_at` / `responses_at` / `messages_at`
-只对单次调用生效。
+三者都是字符串新类型，新增 Provider 不需要修改 `airx-core`。
 
 ---
 
-## 8. 对外 API 与 Feature
+## 5. 协议层实现
 
-### 8.1 Native API
+### 5.1 总览
 
-```rust
-use airx::prelude::*;
+| Provider | 模块 | 默认 base URL | 端点路径 | 认证 |
+| --- | --- | --- | --- | --- |
+| OpenAI Chat | `openai::chat` | `https://api.openai.com/v1` | `/chat/completions` | `Authorization: Bearer` |
+| OpenAI Responses | `openai::responses` | 同上 | `/responses` | `Authorization: Bearer` |
+| Anthropic Messages | `anthropic::messages` | `https://api.anthropic.com` | `/v1/messages` | `x-api-key` + `anthropic-version` |
+| Gemini | `gemini::generate_content` | `https://generativelanguage.googleapis.com/v1beta` | `/models/{model}:generateContent` | `x-goog-api-key` |
 
-// build() 返回已定性的 OpenAI 客户端，可复用
-let openai = Client::openai().api_key("sk-xxx").build()?;
+OpenAI 的 `chat` 与 `responses` 是独立模块：请求 / 响应 / 事件模型不同，不共享类型。
+OpenAI 的共享部分只放在 `openai::common`（错误体、`Usage`、`ReasoningEffort` / `Verbosity`）。
 
-let response = openai
-    .chat()
-    .create(
-        ChatCompletionRequest::builder()
-            .model("gpt-4o-mini")
-            .user("Hello")
-            .build()?,
-    )
-    .await?;
-```
+### 5.2 OpenAI Chat Completions
 
-```rust
-let mut stream = openai.responses().stream(request).await?;
+- 请求：`ChatCompletionRequest`，覆盖 model、messages、采样参数、
+  `max_completion_tokens`（以及已弃用的 `max_tokens`）、`reasoning_effort`、`verbosity`、
+  tools / tool_choice / parallel_tool_calls、`response_format`、stream / stream_options。
+- 消息：system / user（文本或多模态）/ assistant（文本 + tool_calls）/ tool。
+- 响应：choices、usage、system_fingerprint 与扩展字段。
+- 流事件：`ChatStreamEvent::Chunk(ChatCompletionChunk)` 与 `ChatStreamEvent::Done`；
+  `[DONE]` 由端点解码为 `Done`，chunk 内的错误对象直接映射为 `AirxError::Provider`。
+- 聚合：`ChatStreamAccumulator` 合并文本、`reasoning_content`、工具调用增量与 usage；
+  只有收到 `Done` 才完成。
 
-while let Some(event) = stream.next().await {
-    match event? {
-        ResponsesEvent::OutputTextDelta(e) => print!("{}", e.delta),
-        ResponsesEvent::Completed(_) => break,
-        _ => {}
-    }
-}
-```
+### 5.3 OpenAI Responses
 
-`build()` 返回**静态类型**的 Provider 客户端（`OpenAi` / `Anthropic` / `Gemini`），
-不做字符串查找 Provider；客户端持有执行器与配置，可复用发起多次请求。
-官方地址与模式路径都有默认值；兼容部署按需覆盖 `base_url` / `chat_path` /
-`responses_path` / `messages_path`，或使用 `chat_at` 等单次覆盖。
+- 请求：`ResponsesRequest`，输入支持纯文本或 `InputItem` 列表（message / function_call_output）。
+- 输出 item：message（output_text / refusal）、function_call、web_search_call、
+  以及未知 item 的 `Other(Value)`。
+- 流事件：created、output_item.added/done、output_text.delta/done、
+  function_call_arguments.delta/done、completed、failed、incomplete、error；
+  未识别事件保留为 `Unknown(Value)`。
+- 端点忽略空 data 与 `[DONE]`；`type == "error"` 映射为 `ProviderError`。
+- 聚合：`ResponsesStreamAccumulator` 按 `output_index` 维护 item；
+  `response.completed` 才完成，`response.failed` / `error` 记为失败。
 
-### 8.2 Gemini API
+### 5.4 Anthropic Messages
 
-Gemini 的模型位于路径中，因此模型在进入 API 时指定：
+- 请求：`MessagesRequest`；`max_tokens` 必填；支持 `output_config`
+  （`effort` / 结构化输出格式）、`thinking`、tools / tool_choice、`stop_sequences`。
+- 内容块：text、image、tool_use、tool_result、thinking、redacted_thinking、
+  server_tool_use、web_search_tool_result；未知块保留为 `ContentBlock::Other(Value)`。
+- 错误体映射为 `ProviderError`，保留 `type` 与 `message`。
+- 流事件：message_start、content_block_start/delta/stop、message_delta、message_stop、
+  ping、error、未知事件；端点层过滤 `ping`。
+- 聚合：`MessagesStreamAccumulator` 按内容块 index 合并；工具参数增量在
+  `finish()` 时解析（严格模式下非法 JSON 报错）；只有收到 `message_stop` 才完成。
 
-```rust
-let gemini = Client::gemini().api_key("...").build()?;
+### 5.5 Gemini generateContent
 
-let response = gemini
-    .generate_content("gemini-2.5-flash")
-    .create(
-        GenerateContentRequest::builder()
-            .system("be concise")
-            .user("Hello")
-            .max_output_tokens(256)
-            .thinking(GeminiThinkingConfig::dynamic())
-            .build()?,
-    )
-    .await?;
+- 模型在路径中：端点持有 `ModelId`，请求体不含模型字段。
+  - `gemini-2.5-flash` → `models/gemini-2.5-flash`
+  - `models/…` / `tunedModels/…` / `publishers/…` 原样保留
+  - 空模型、非法字符、`.` / `..` 段会被拒绝
+- 请求：`contents`、`systemInstruction`、`tools` / `toolConfig`、
+  `generationConfig`（采样、结构化输出、thinking、模态等）、`safetySettings`、`cachedContent`。
+- 内容片段：text（含 `thought` / `thoughtSignature`）、inlineData、fileData、
+  functionCall、functionResponse、executableCode、codeExecutionResult、`Other(Value)`。
+- 响应：candidates、promptFeedback、usageMetadata、modelVersion、responseId 与扩展字段。
+- 流式：使用 `alt=sse`；每个 SSE data 就是一个 `GenerateContentResponse` 增量。
+  没有 `[DONE]`；聚合器以候选 `finishReason` 或 `promptFeedback.blockReason` 判定完成，
+  缺失时返回 `Incomplete`；`FINISH_REASON_UNSPECIFIED` 不视为完成。
 
-println!("{}", response.text());
-```
+### 5.6 未知结构策略
 
-流式使用 `stream()` + `GenerateContentStreamAccumulator`；完成语义由
-`finishReason` / `promptFeedback.blockReason` 决定，不依赖 `[DONE]`。
-
-### 8.3 Feature 设计
-
-| Feature | 内容 |
+| 位置 | 策略 |
 | --- | --- |
-| `native` | Native HTTP（reqwest，TLS 后端可再细分） |
-| `wasm` | 浏览器 Fetch |
-| `openai` | OpenAI Responses + Chat |
-| `anthropic` | Anthropic Messages |
-| `gemini` | Gemini generateContent + streamGenerateContent |
-| `all-providers` | 全部 Provider |
-| `stream` | 流式能力（core / transport / protocol 联动） |
-| `json` | JSON 扩展工具 |
-
-约定：
-
-- 默认 `native + rustls-tls + all-providers + stream`：三协议开箱即用。
-  需要裁剪时使用 `default-features = false`，按需选择 Provider 与平台后端。
-- `all-providers` 只是 `openai + anthropic + gemini` 的聚合，不引入额外依赖。
-- Cargo features 是 additive：同一依赖被多路径引入会合并，需特别关注 TLS 选择与 native/wasm 的目标依赖。
-- `rustls-tls` / `native-tls` 二选一；`native` / `wasm` 按目标平台选择。
-- 没有流式能力的协议不被 `stream` 强行牵连，按模块导出。
-
-### 8.4 Builder 只做配置
-
-```rust
-let openai = Client::builder()
-    .transport(transport)
-    .timeout(Duration::from_secs(60))
-    .retry_policy(RetryPolicy::default())
-    .default_headers(headers)
-    .openai()
-    .api_key("sk-...")
-    .build()?;
-```
-
-Builder 不做业务决策、不做请求改写、不做隐式重试。
-执行配置先累积，`build()` 时与 Provider 配置一起固化为可复用的客户端。
+| 请求 / 响应 / chunk 的未知字段 | `extensions`（flatten） |
+| OpenAI Responses 未知 item | `OutputItem::Other(Value)` |
+| OpenAI Responses 未知事件 | `ResponsesEvent::Unknown(Value)` |
+| Anthropic 未知内容块 | `ContentBlock::Other(Value)` |
+| Anthropic 未知事件 | `MessagesEvent::Unknown(Value)` |
+| Gemini 未知 part | `Part::Other(Value)` |
 
 ---
 
-## 9. 质量保障
+## 6. 流式基础设施
 
-### 9.1 测试矩阵
+### 6.1 三层职责
 
-| 维度 | 覆盖点 |
-| --- | --- |
-| Serialization | 请求序列化、响应反序列化、字段缺省与 `null`、未知字段保留、Raw JSON |
-| Streaming | SSE 分片边界、UTF-8 跨 buffer、多行 data、tool 参数 delta、异常中断、正常完成、`[DONE]` |
-| Protocol | Responses、Chat Completions、Messages、Gemini generateContent、兼容部署 JSON mode |
-| Compatibility | JSON Schema、tool_choice、thinking、多模态、Provider 专属字段 |
-| Aggregation | 各协议 Accumulator 的完成 / 失败 / 截断三态 |
-| Platform | Linux / macOS / Windows / `wasm32-unknown-unknown` |
-| Transport | Mock 执行、超时、重试退避、取消、错误映射 |
+| 层 | 位置 | 职责 |
+| --- | --- | --- |
+| 网络 | `airx-transport` | 响应字节流与背压 |
+| SSE 语法 | `airx-core::stream` | 字节 → 行 → 字段 → `RawEvent` |
+| 协议事件 | `airx-protocol` | `RawEvent` → Provider 原生事件 |
+| 聚合 | `airx-protocol` | 增量事件 → 完整响应 |
 
-### 9.2 Golden Fixtures
+SSE 层只认语法，不认 `[DONE]` 等协议约定。
 
-```text
-tests/fixtures/
-├── openai/{responses,chat}/{request,response}.json + events/
-├── anthropic/messages/{request,response}.json + events/
-└── gemini/generate/{request,response,error}.json
-```
+### 6.2 LineBuffer
 
-协议模型每次变更都跑：反序列化 → 序列化 → 字段兼容性 → 流事件 → 聚合器 → WASM 编译。
+- 处理 `LF`、`CRLF`、单独 `CR`；末尾 `CR` 等待下一字节，避免把 `CRLF` 误判为 `CR` + 空行。
+- 忽略流开头 UTF-8 BOM，BOM 跨 chunk 也能识别。
+- 按整行校验 UTF-8；行结束符均为 ASCII，跨 chunk 的多字节字符在行结束时已完整。
 
-不要只比较 JSON 字符串：结构等价与“明确要求字节保真”的用例分开断言。
+### 6.3 SseDecoder
 
-### 9.3 编译与依赖治理
+- 维护 `event`、多行 `data`、`id`、`retry` 与 `last_event_id`。
+- 只有以空行结束且 `data` 非空的事件才会分发；注释与空事件被忽略。
+- `finish()` 区分“最后一个事件已完整”与“事件未闭合”；后者返回 `Incomplete`。
+- `RawEvent { event, data, id, retry }` 是协议层的唯一输入。
 
-- `rustfmt.toml` 统一格式；lint 统一在根 `[workspace.lints]` 配置并由各 crate 继承，不分散到 `clippy.toml`。
-- 依赖方向由 `scripts/check-deps.sh` 校验；`deny.toml` 在 M9 接入许可白名单、重复依赖与安全公告检查。
-- CI 矩阵：`cargo test`、`cargo check --target wasm32-unknown-unknown`、feature 组合抽样（最小 / 默认 / all-providers / gemini+stream）。
-- MSRV 与 edition 2024 保持一致（Rust 1.85+），实际发布前按 WASM 目标与 TLS 方案复核依赖版本。
+### 6.4 ProtocolStream
 
----
+- 组合 `StreamingEndpoint + ByteStream + SseDecoder`。
+- `next()` 在事件边界等待字节；EOF 时先冲刷 SSE，再返回 `Ok(None)`。
+- 字节流错误映射为 `AirxError::Transport`；事件未闭合映射为 `AirxError::Stream`。
+- 非 2xx 流式响应先读完 body，由协议层解码，避免错误信息丢失。
 
-## 10. 实施路线
+### 6.5 聚合器
 
-围绕两个约束排序：**依赖只能自底向上**，**功能必须纵向切通**。任何一层都不等“全量完成”才接线。
-
-### 10.1 里程碑与内部顺序
-
-| 里程碑 | 前置 | 实现顺序 | 出口标准 |
+| Provider | 类型 | 完成条件 | 失败条件 |
 | --- | --- | --- | --- |
-| **M0 Workspace 接线** | — | 根 `[workspace.package]` / `[workspace.dependencies]` / feature 空表 → 各 crate 声明允许依赖 → fmt/clippy/CI 最小集 | 全 workspace `cargo check` 通过；`cargo metadata` 可校验依赖方向 |
-| **M1 core 契约层** | M0 | `error` → `model` → `http`（数据结构）→ `json::{raw,value,format}` → `stream::{buffer,sse,decoder,status,json_accumulator}` | SSE 在任意字节切分、CRLF/LF、UTF-8 跨块下测试通过；无 IO、无 async、无时钟 |
-| **M2 transport 执行层** | M1 | `transport` trait → `mock` → `native`（reqwest）→ `stream`（字节流/背压）→ 错误映射 + `ResponseMetadata` → timeout/cancel → `retry`/`middleware` | Mock 覆盖全部执行分支；一条流式读取测试通过；trait 形状满足非 `Send` 平台 |
-| **M3 第一条端到端竖切** | M1、M2 | 最小 `Client`/`Builder` → `openai::chat` 最小子集（config、request、response、message）→ 编解码接到 transport → example | Mock 驱动的一次 `create` 全链路通过。**Protocol / Transport / Client 三契约在此冻结** |
-| **M4 OpenAI Chat 完整 + 流式** | M3 | 非流式补全（tool、structured output、多模态）→ `chunk`/事件模型 → 接通 SSE → Accumulator | fixtures 全绿；`finish()` 四态断言；tool 参数增量 JSON 测试 |
-| **M5 OpenAI Responses** | M4 | `input`/`item` → `response`/`output` → 非流式 create → 语义事件 → Accumulator → 工具/结构化/多模态 | fixtures 全绿；事件类型逐条对齐官方事件名 |
-| **M6 Anthropic Messages** | M5 | config/common → content block/message → request/response → tool use/thinking → 事件 + Accumulator → caching/structured outputs | fixtures 全绿；**新增 Provider 未修改 core 与 transport**（架构验证点） |
-| **M7 兼容部署（DeepSeek）** | M6 | OpenAI-Compatible / Anthropic-Compatible base_url → JSON mode 示例 → 文档 | 同一协议客户端可直接接入，无 provider 专属协议模块 |
-| **M8 Gemini** | M7 | config/common → contents/parts → generationConfig/tools → response → SSE + Accumulator → 示例 | fixtures 全绿；**新增 Provider 未修改 core 与 transport**（架构验证点）；流完成语义与截断断言 |
-| **M9 生产化** | M8 | WASM Fetch → retry 策略细化 → middleware/tracing → Canonical JSON 与 Raw 透传 API → `deny`/clippy/MSRV/feature 矩阵 → 文档与示例 → API 冻结评审 | 跨平台 CI 全绿；公共 API 冻结候选 |
+| OpenAI Chat | `ChatStreamAccumulator` | 收到 `Done`（`[DONE]`） | 终态后继续 apply → `InvalidState` |
+| OpenAI Responses | `ResponsesStreamAccumulator` | `response.completed` | `response.failed` / `error` → `Failed`；未完成 → `Incomplete` |
+| Anthropic | `MessagesStreamAccumulator` | `message_stop` | `error` → `Failed`；未完成 → `Incomplete` |
+| Gemini | `GenerateContentStreamAccumulator` | `finishReason` 或 `blockReason` | 其它结束方式 → `Incomplete` |
 
-为什么这个顺序：
-
-- **M1 先做 `error`**：所有函数签名都要用到它，先定形状可避免后期批量改签名。
-- **M2 先做 `mock` 再做 `native`**：Mock 是 M3 之后全部测试的基础设施，晚做会被迫用真实网络写测试。
-- **M3 只做“薄竖切”**：在写几百个类型之前先验证组合契约；契约错误此时修复成本最低。
-- **先 Chat 后 Responses**：Chat 的非流式与 `chunk/delta` 模型更简单，用来把解码与流式基础设施跑通；Responses 的 item 生命周期与语义事件放在基础稳固之后。
-- **兼容部署与新增协议分开验证**：DeepSeek 通过 base_url 验证“新增部署不改协议”；
-  Gemini 通过独立协议模块验证“新增协议不改 core / transport”。
-- **WASM、Canonical JSON、可观测放到 M9**：在此之前没有真实消费者，提前实现容易做成无人使用的抽象。
-
-### 10.2 排序原则
-
-1. **依赖自底向上，功能纵向切透**：每完成一层就接一条端到端链路，不做“全量类型后再接线”。
-2. **能力进入方式固定**：先落 fixture（取自真实响应/官方文档），再写类型，再写断言，最后接 UI 入口。
-3. **用新增 Provider 检验架构**：M6/M7 若需要改动 core 或 transport，停下来修边界，而不是加 `if`。
-4. **稳定度与冻结节奏**：`airx-core` 在 M2 结束后冻结公共 API；`airx-protocol` 随官方协议持续演进。
-5. **每个里程碑结束**：`cargo test` + `cargo check --target wasm32-unknown-unknown` + fmt/clippy 全绿，不允许跨里程碑带债。
-
-### 10.3 明确暂缓
-
-| 项目 | 暂缓原因 |
-| --- | --- |
-| Gemini `countTokens` / 模型列表 | 无首批消费者；需要时用 `extensions` 或原生 Endpoint 逃生通道 |
-| 派生宏 crate | 手写 builder/serde 已足够，宏会提前锁死字段形态 |
-| WebSocket / 双向流 Transport | 当前协议均为 HTTP + SSE |
-| 运行时 Provider Registry | 静态类型入口已覆盖；不引入字符串查找 Provider |
-| `ApiProtocol` 的 trait object 化 | 静态泛型已覆盖；动态分发在确有需要时再适配 |
-| Canonical JSON（JCS） | 等出现签名/缓存 Key 的真实需求 |
-| 多语言绑定（FFI/WASM 包） | 待 Rust API 冻结后再考虑 |
+`StreamStatus`（`Active` / `Completed` / `Failed` / `Incomplete` / `Cancelled`）统一表达
+生命周期；只有 `Completed` 是成功。
 
 ---
 
-## 11. 当前状态
+## 7. 配置、URL 与 Header
 
-**M0–M9 已全部完成**（边界见下方“已知缺口”）。
+### 7.1 配置分层
 
-M0：
+| 层 | 持有者 | 内容 |
+| --- | --- | --- |
+| 执行级 | `ClientBuilder` → `Executor` | Transport、连接 / 整体超时、`RetryPolicy`、执行级默认 Header |
+| 单次请求 | `RequestOptions` | 临时 Header、`Idempotency-Key` |
+| Provider 级 | `OpenAiConfig` / `AnthropicConfig` / `GeminiConfig` | API Key、base URL、模式路径、API 版本、组织 / 项目、Provider 默认 Header |
 
-- 4 个 crate（core / protocol / transport / airx）接入 workspace，`edition = "2024"`、`resolver = "3"`、`rust-version = "1.85"`。
-- 根 `Cargo.toml` 配置 `[workspace.dependencies]`、`[workspace.lints]`（`unsafe_code = forbid` 等）与 release profile。
-- 依赖方向由 `scripts/check-deps.sh` 强制；`.github/workflows/ci.yml` 覆盖 fmt、clippy、test、依赖方向、最小 feature 与 wasm32 编译。
+Provider 配置的 `Debug` 会隐藏 API Key。
 
-M1（`airx-core`，纯函数、无 IO、无 async、无时钟）：
+### 7.2 URL 与模式路径
 
-| 模块 | 已实现 |
-| --- | --- |
-| `error` | `AirxError` 八类变体；`TransportError` / `HttpError` / `ProviderError` / `StreamError` 等保留 status、code、request id、原始 body 与 source 链；`is_retryable()` / `http_status()` 中立判定；WASM 下放宽 `Send + Sync` |
-| `model` | `ProviderId` / `ModelId` / `ApiVersion` 三个独立字符串新类型；Provider 标识只作标签，不决定协议 |
-| `http` | `HttpRequest` / `HttpResponse` 数据结构与 `http` 类型 re-export，不含客户端 |
-| `json` | `RawJson`（`Box<RawValue>`）与 `parse_raw` / `raw_from_value`、`RawExtension`、`Extensions`（`BTreeMap`）、`JsonMode` 四态；`Canonical` 显式返回未实现错误 |
-| `stream::buffer` | 字节 → 行：LF / CRLF / 单 CR、跨 chunk `CR` 等待、UTF-8 整行校验、BOM 跳过 |
-| `stream::sse` | 字段语法（`event` / `data` / `id` / `retry` / 注释 / 无冒号行）与 `RawEvent` |
-| `stream::decoder` | 事件装配：多行 data、空 data 不分发、`last_event_id`、`finish()` 区分完成与截断 |
-| `stream::json_accumulator` | 增量结构判定（`Empty` / `Incomplete` / `Complete` / `Malformed`）、只扫描增量、不完整时给出明确状态 |
-| `stream::status` | `StreamStatus` 五态，`Incomplete` 与 `Failed` 分离 |
+`base_url` 必须是绝对地址，末尾 `/` 会被去掉。模式路径与 `base_url` 解耦：
 
-M2（`airx-transport`，唯一 IO 层）：
+| Provider | 模式 | 默认路径 | 构建时覆盖 | 运行时覆盖 |
+| --- | --- | --- | --- | --- |
+| OpenAI | chat | `/chat/completions` | `.chat_path(...)` | `chat_at(...)` |
+| OpenAI | responses | `/responses` | `.responses_path(...)` | `responses_at(...)` |
+| Anthropic | messages | `/v1/messages` | `.messages_path(...)` | `messages_at(...)` |
+| Gemini | generateContent | `/models/{model}:generateContent` | 由模型决定 | — |
+| Gemini | stream | `/models/{model}:streamGenerateContent?alt=sse` | 由模型决定 | — |
 
-| 模块 | 已实现 |
-| --- | --- |
-| `transport` | 对象安全 `Transport`（`BoxFuture`）、`&T` / `Arc<T>` 转发、Native 要求 `Send + Sync`、WASM 去掉该约束 |
-| `mock` | 响应队列、流式响应、错误注入、请求记录；克隆共享状态 |
-| `native` | Reqwest 实现、超时、请求映射、错误分类（connect / timeout / body / TLS / other）并保留 source |
-| `stream` / `response` | `ByteStream`、`HttpStreamResponse`、`ResponseMetadata` 与常见 request id Header |
-| `retry` | `RetryPolicy`（默认关闭、指数退避、上限）、`Retry-After`、幂等感知：Connect 任意方法 / Timeout 与 5xx 仅幂等方法 / 429 任意方法；流式不重试 |
-| `middleware` | 同步中间件链（请求正序、响应逆序），流式响应不触发 `on_response` |
+路径解析规则（`airx-protocol::internal::url`）：
 
-M3（端到端竖切，契约冻结）：
+- 相对路径补前导 `/`，拼接到 `base_url`。
+- 完整 `http(s)://` URL 原样使用，忽略 `base_url`。
+- 拒绝空路径、协议相对地址、非法 URI。
 
-| 契约 | 实现 |
-| --- | --- |
-| Protocol | `airx_protocol::Endpoint`（`encode` / `decode`，纯函数）；`openai::chat` 的 Request / Message / Response / Endpoint / 错误映射 / `OpenAiConfig`（Debug 脱敏、base_url 校验） |
-| Transport | 固定错误形状 + `BoxFuture` + Mock/Reqwest 双实现 |
-| Client | `Client` / `ClientBuilder` / `OpenAiBuilder` / typed `chat().create()`；执行级 Header 不覆盖协议 Header；Provider Builder 的 `build()` 返回已定性客户端，可复用 |
-| 端到端 | Mock 驱动的 8 个集成用例：全链路、Provider 错误、Header 优先级、默认不重试、429 重试、base_url 覆盖、缺失 api_key、扩展字段透传 |
+### 7.3 Header 优先级
 
-M4（OpenAI Chat 完整化与流式）：
+从上到下优先级降低：
 
-| 能力 | 实现 |
-| --- | --- |
-| 请求 | tools / tool_choice / parallel_tool_calls / response_format（json_schema）/ stream / stream_options |
-| 消息 | 多模态 user parts、assistant tool_calls、tool 结果 |
-| 事件 | `ChatStreamEvent::{Chunk, Done}`、chunk/delta/tool_calls 增量、usage chunk |
-| 聚合 | `ChatStreamAccumulator`：合并文本与工具参数，未收到 `[DONE]` 报 `Incomplete` |
-| 契约 | `StreamingEndpoint` + `ProtocolStream`：字节流 → SSE → 协议事件，非 2xx 先读完 body 再映射错误 |
+1. **单次请求 `RequestOptions`**：最后写入，覆盖同名 Header；可设置 `Idempotency-Key`。
+2. **Provider 配置的 `default_headers`**：编码阶段最后写入，同名校验为覆盖。
+3. **协议层写入**：`content-type`、认证 Header（`Authorization` / `x-api-key` /
+   `x-goog-api-key`）、`anthropic-version`、`openai-organization` / `openai-project`。
+4. **执行级 `default_headers`**：仅填充缺失 Header（`or_insert`），不覆盖已有值。
+5. **缺省 Header**：`User-Agent: airx/<version>`；`Accept` 由 `ApiClient` 按调用模式
+   设置为 `application/json` 或 `text/event-stream`（均不覆盖已有值）。
 
-M5（OpenAI Responses）：
+网关需要的额外 Header（如 OpenCode Zen 的 `x-opencode-session`）通过执行级
+`ClientBuilder::default_headers` 注入。Provider 级默认 Header 通过各 Config 的
+`with_header` 提供，不经过门面构建器。
 
-| 能力 | 实现 |
-| --- | --- |
-| 请求 | input（文本 / item）、instructions、max_output_tokens、tools、stream |
-| 响应 | OutputItem（message / function_call）、`Other(Value)` 保留未知 item / content |
-| 事件 | created / output_item.added·done / output_text.delta·done / function_call_arguments.delta·done / completed / failed / incomplete / error / `Unknown(Value)` |
-| 聚合 | `ResponsesStreamAccumulator`：完成后优先使用服务端完整响应，否则合成累积 item |
+### 7.4 错误归属与 request id
 
-M6（Anthropic Messages）：
-
-| 能力 | 实现 |
-| --- | --- |
-| 请求 | system、max_tokens、output_config（effort / format）、stop_sequences、tools / tool_choice、thinking |
-| 内容块 | text / image / tool_use / tool_result / thinking / redacted_thinking / `Other(Value)` |
-| 事件 | message_start / content_block_start·delta·stop / message_delta / message_stop / ping / error / `Unknown(Value)` |
-| 聚合 | `MessagesStreamAccumulator`：tool 参数增量拼接后解析，`message_stop` 前终止报 `Incomplete` |
-
-M7（兼容部署：DeepSeek）：
-
-- 不再提供独立 DeepSeek 协议模块；DeepSeek 通过 OpenAI-Compatible（`https://api.deepseek.com`）
-  或 Anthropic-Compatible（`https://api.deepseek.com/anthropic`）端点接入，只改 `base_url`。
-- JSON mode：`response_format=json_object`，提示词必须包含 “json” 与示例；空 content/截断需兜底。
-- 新增 `deepseek_json` 示例，同时展示两种协议形态。
-
-M8（Gemini generateContent）：
-
-- `GeminiConfig`（`x-goog-api-key`、`base_url`、默认 Header、Debug 脱敏）。
-- 模型在路径中：`/models/{model}:generateContent` 与 `:streamGenerateContent?alt=sse`；
-  裸模型名、`models/…`、`tunedModels/…`、`publishers/…` 规范化。
-- Request：`contents` / `systemInstruction` / `tools` / `toolConfig` / `generationConfig`
-  （含 `thinkingConfig`）/ `safetySettings` / `cachedContent` / `extensions`。
-- Part 全类型与未知 Part 保留；响应含 `candidates` / `promptFeedback` / `usageMetadata` /
-  `modelVersion` / `responseId`。
-- `GenerateContentStreamAccumulator`：文本按 thought 标记合并，`finishReason` /
-  `blockReason` 判定完成，缺失报 `Incomplete`。
-
-M9（生产化）：
-
-| 项 | 实现 |
-| --- | --- |
-| WASM | `WasmTransport`：Fetch 请求、Header 转换、`ReadableStream` 流式；`wasm32` 编译检查通过 |
-| 可观测 | `tracing` 请求 / 响应 / 流建立 / 重试事件；不记录敏感 Header |
-| CI | fmt / clippy / test / rustdoc（`-D warnings`）/ 依赖方向 / 最小 feature / wasm32（含 gemini） |
-| 文档 | `protocol-support.md`、`compatibility.md`、README 快速开始与 Feature 表 |
-| 示例 | `chat`、`chat_stream`、`gemini`、`gemini_stream` |
-
-测试总计 **227** 个，`cargo test --workspace --features airx/anthropic,airx/gemini` 全绿。
-覆盖 SSE 任意字节切分、UTF-8 跨 chunk、CRLF/CR、BOM、截断流、增量 JSON、四个协议路径的
-流式事件与聚合、错误映射、重试幂等分支、Header 优先级、Gemini 完成/截断语义。
-
-**已知缺口（有意保留，且不会静默降级）**：
-
-1. `JsonMode::Canonical`（RFC 8785 JCS）未实现，返回明确错误；不做“近似规范化”。
-2. WASM 传输只做了编译检查，浏览器运行时（CORS、受限 Header、流读取）尚未纳入 CI。
-3. 中间件为同步实现；异步中间件（如 Token 刷新）请自定义 `Transport`。
-4. 流式请求不重试；首事件前重试留待后续。
-5. `Option<T>` 不区分 `null` 与缺省；字节 / null 级保真需使用 `RawJson`（见 `docs/compatibility.md`）。
-6. Gemini 未封装 `countTokens`、模型列表与 Vertex AI 专属参数；可用 `extensions`
-   或原生 `Endpoint` 逃生通道，不静默丢弃。
-
-**接口对齐（2026-11-23）**：按官方 SDK / API 文档更新协议模型——Anthropic 移除
-`temperature` / `top_p` / `top_k`，新增 `output_config`（`effort` / `format`）与四种
-`thinking` 形态；OpenAI `max_tokens` 弃用，新增 `max_completion_tokens` /
-`reasoning_effort` / `verbosity`，Responses 增加 `reasoning.effort` 与 `text.format`；
-DeepSeek 通过 OpenAI / Anthropic 兼容端点接入，不设独立协议；Gemini 按
-`generateContent` / `generationConfig` / `functionCallingConfig` 建模，流完成以
-`finishReason` / `blockReason` 判定。差异记录在 `docs/protocol-support.md` 与
-`docs/compatibility.md`。
-
-服务端联网工具（`web_search` / `web_fetch` / `deepseek_web_search`）按 Provider 建模：
-工具声明与结果（`web_search_call`、`server_tool_use`、`web_search_tool_result`、
-`annotations`）进协议层，联网请求由 Provider 后台执行，airx 不代发。
-
+- Provider 错误体由各协议模块解析；无法解析时退化为 `HttpError`，保留原始 body。
+- `request_id` 从 `x-request-id` / `request-id` / `x-amzn-requestid` 提取。
+- 错误结构保留状态码、错误码、request id、响应头与原始响应体；
+  是否记录敏感 Header 由错误形状决定，认证 Header 不进入日志。
 
 ---
 
-## 12. 附录：决策速查与被否决方案
+## 8. Feature 与平台
 
-### 12.1 速查
+### 7.5 SDK 体验层
 
-| 问题 | 结论 |
+协议层之外，门面提供与官方 SDK 对齐的体验层：
+
+| 能力 | API | 位置 |
+| --- | --- | --- |
+| 响应元数据 | `create_with_meta` → `WithMeta<T> { data, meta }`；`ResponseMeta` 含 status / headers / request id / raw body | `airx/src/response.rs` |
+| 流式元数据 | `ProtocolStream::meta()` / `request_id()` | 同上 |
+| 单次请求选项 | `with_options(RequestOptions)`；追加 Header、`Idempotency-Key` | `airx/src/options.rs` |
+| `futures::Stream` | `ProtocolStream` 实现 `futures_core::Stream`，支持 `TryStreamExt` / `select!` | `airx/src/stream.rs` |
+| 流式收尾 | 各协议 `final_response()` / `final_text()`，内部驱动对应 Accumulator | 同上 |
+| 结构化输出 | `parse_as::<T>()`（Chat / Responses / Messages / Gemini），只做 serde 解析 | 各 Provider 客户端 |
+| 模型列表 | `client.models().list() / retrieve()`；Anthropic / Gemini 支持 `list_all()` 翻页 | 各 Provider 客户端 |
+| 计 token | Anthropic `messages().count_tokens()`；Gemini `generate_content(m).count_tokens()` | 同上 |
+
+默认策略对齐官方 SDK：native 2 次重试、10 秒连接超时、`User-Agent: airx/<version>`。
+整体超时默认关闭，避免截断长流；需要时通过 `ClientBuilder::timeout` 设置。
+
+### 8.1 门面 feature
+
+`airx` 默认启用 `native + rustls-tls + all-providers + stream`。
+
+| Feature | 作用 |
 | --- | --- |
-| 整体架构 | Protocol-First |
-| crate 数量 | 4（core / protocol / transport / airx） |
-| 核心设计 | Functional Core / Imperative Shell |
-| Provider 扩展 | 独立协议模块，按 provider × api 划分 |
-| Native API | 独立强类型模型，不经过统一中转 |
-| JSON | Serde + RawValue + Value + Bytes，四种表示 |
-| Stream | SSE 解析一次，事件各自建模，聚合独立 |
-| IO | 可替换 Transport，协议零 HTTP 依赖 |
-| WASM | 同 crate + target-specific 实现 + feature |
-| Async | 原生 async + 静态泛型，不强制 Send |
-| 错误 | 统一分类 + 原始信息保留 |
-| 测试 | Golden Fixtures + 协议/流式矩阵 |
-| 演进 | 小 Workspace、强模块边界、协议保真、纯函数、可替换副作用 |
+| `native` | Reqwest 传输 |
+| `rustls-tls` / `native-tls` | TLS 后端，二选一 |
+| `wasm` | 浏览器 Fetch 传输 |
+| `openai` / `anthropic` / `gemini` | 启用对应协议模块 |
+| `all-providers` | 三者全开 |
+| `stream` | 门面流式 API（`ProtocolStream`、`stream()` 方法） |
+| `json` | 预留开关（`JsonMode` / `RawJson` 当前始终可用） |
 
-### 12.2 长期竞争力预留
+按需裁剪示例：
 
-1. **API Versioning**：API 版本、Beta Header、Feature Header 由各协议 Client 管理，不散落在通用代码。
-2. **Model Registry**：支持用户自定义能力、别名与模型专属参数；模型名不决定能力。
-3. **Raw Request / Raw Response**：Provider 新增字段而 SDK 未支持时，用户仍可通过 Raw JSON 与原生接口使用新能力，无需等待发版。
+```toml
+airx = { version = "0.1", default-features = false, features = ["native", "rustls-tls", "openai", "stream"] }
+```
 
-### 12.3 设计哲学
+### 8.2 传输 feature
 
-> Small Workspace, Strong Module Boundaries, Native Protocol Fidelity, Functional Core, Replaceable Effects.
+- `airx-transport` 默认 `native + rustls-tls`。
+- `native` 引入 reqwest；`wasm` 引入浏览器依赖；两者按目标平台选择。
+- TLS 后端只选一个。
 
-一句话：4 个 crate、单向依赖、原生协议优先、纯函数编解码、副作用集中在 transport。
+### 8.3 占位 feature
 
-### 12.4 参考
+`airx-core` 的 `stream` / `json`、`airx-protocol` 的 `stream`、
+`airx-transport` 的 `stream` 目前是空 feature：
 
-- [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses)
-- [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
-- [OpenAI Responses Streaming Events](https://developers.openai.com/api/reference/resources/responses/streaming-events)
-- [Anthropic API Documentation](https://docs.anthropic.com/)
-- [Gemini API Reference](https://ai.google.dev/api/generate-content)
+```toml
+stream = []
+json = []
+```
+
+它们不会裁剪模块；流式与 JSON 工具在对应 crate 中始终编译。真正控制门面流式 API 的
+是 `airx` 的 `stream` feature。
+
+### 8.4 平台约束
+
+- WASM 下不提供 `RetryTransport`；客户端默认关闭重试，显式启用会在构建时返回配置错误。
+- Native 的 `Send + Sync` 约束在 WASM 下放宽，以适配浏览器 Future / Stream。
+- WASM 传输已通过 `wasm32-unknown-unknown` 编译检查；浏览器运行时行为未纳入 CI。
+
+---
+
+## 9. 测试与质量保障
+
+### 9.1 测试分层
+
+| 层 | 位置 | 覆盖 |
+| --- | --- | --- |
+| 单元测试 | `airx-core/src/**`、`airx-protocol/src/**`、`airx-transport/src/**` | SSE 边界、错误分类、路径校验、重试规则、聚合状态机 |
+| 协议集成测试 | `airx-protocol/tests/*_protocol.rs` + `tests/fixtures/**` | 编码 Header / URL、响应解析、未知字段往返、错误体映射 |
+| 端到端竖切 | `airx/tests/*.rs` | Mock Transport → 编码 → 执行 → 解码 / 流式聚合 |
+| 路径覆盖 | `airx/tests/endpoint_paths.rs` | base_url 与模式路径的构建时 / 运行时覆盖 |
+| SDK 体验 | `airx/tests/sdk_experience.rs`、`models_and_tokens.rs` | 请求选项、响应元数据、`Stream`、parse、默认重试、models / countTokens |
+
+当前共 **256** 个测试，`cargo test --workspace` 全绿。
+
+关键断言：
+
+- SSE 在每个字节边界切分都能稳定解码。
+- 未知字段经过一次反序列化 / 序列化往返仍保留。
+- 非 2xx 流式响应能还原 Provider 错误。
+- 截断流不会被当作成功。
+- 执行级 Header 不覆盖协议 Header；单次请求选项可覆盖。
+- native 默认重试按幂等性与 429 规则执行；显式禁用后只发一次。
+
+### 9.2 CI
+
+`.github/workflows/ci.yml` 执行：
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+./scripts/check-deps.sh
+cargo check -p airx --no-default-features
+cargo check -p airx --no-default-features --features gemini
+cargo check -p airx --target wasm32-unknown-unknown \
+  --no-default-features --features wasm,all-providers,stream
+```
+
+---
+
+## 10. 已知边界
+
+- `Option<T>` 无法区分 `null` 与字段缺省；需要 null 或字节级保真时使用 `RawJson`。
+- `JsonMode::Canonical`（RFC 8785 JCS）尚未实现，会返回明确错误。
+- 中间件是同步的；需要异步操作（如刷新 Token）时应实现自定义 `Transport`。
+  流式响应不会调用 `on_response`。
+- 流式请求不重试；首个事件前重试尚未实现。
+- WASM 不支持自动重试（默认关闭）；native 默认 2 次。
+- WASM 传输只做编译检查，浏览器运行时未纳入 CI。
+- Gemini 已封装 `generateContent` / `streamGenerateContent` / `countTokens` / 模型列表；
+  Vertex AI 专属参数与 Live API 未封装，可用 `extensions` 或原生 `Endpoint`。
+- 文件、批处理、Embeddings、图片/音频等平台接口尚未封装。
+- 服务端联网工具由 Provider 后台执行；airx 只声明工具并解析引用 / 调用记录，
+  不发起本地网络请求。
+- Provider 参数随模型演进；能力与对齐来源以
+  [protocol-support.md](protocol-support.md) 和 [compatibility.md](compatibility.md) 为准。
+
+---
+
+## 附录 A：模块地图
+
+```text
+crates/
+├── airx-core/src/
+│   ├── error.rs              # AirxError / ProviderError / TransportError / StreamError
+│   ├── http.rs               # HttpRequest / HttpResponse，无客户端
+│   ├── model.rs              # ProviderId / ModelId / ApiVersion
+│   ├── json/
+│   │   ├── format.rs         # JsonMode / to_string
+│   │   ├── raw.rs            # RawJson / RawExtension / parse_raw
+│   │   └── value.rs          # Extensions（BTreeMap<String, Value>）
+│   └── stream/
+│       ├── buffer.rs         # 字节 → 行（LF / CRLF / CR、BOM、UTF-8）
+│       ├── decoder.rs        # 行 → RawEvent
+│       ├── sse.rs            # SSE 字段语法
+│       ├── status.rs         # StreamStatus
+│       └── json_accumulator.rs # 增量 JSON 结构完整性判断
+├── airx-protocol/src/
+│   ├── endpoint.rs           # Endpoint / StreamingEndpoint
+│   ├── internal/url.rs       # 模式路径与 URL 解析
+│   ├── openai/
+│   │   ├── config.rs         # OpenAiConfig
+│   │   ├── models.rs         # 模型列表 / 详情
+│   │   ├── common/           # 错误体 / Usage / ReasoningEffort / Verbosity
+│   │   ├── chat/             # 请求 / 响应 / chunk / event / tool / endpoint / accumulator
+│   │   └── responses/        # 请求 / 响应 / item / event / tool / endpoint / accumulator
+│   ├── anthropic/
+│   │   ├── config.rs         # AnthropicConfig
+│   │   ├── common.rs         # 错误体 / Usage
+│   │   ├── models.rs         # 模型列表 / 详情（cursor 分页）
+│   │   └── messages/         # 请求 / 响应 / 内容块 / event / endpoint / accumulator / count_tokens
+│   └── gemini/
+│       ├── config.rs         # GeminiConfig
+│       ├── common.rs         # 错误体 / SafetyRating / UsageMetadata
+│       ├── models.rs         # 模型列表 / 详情（pageToken 分页）
+│       └── generate_content/ # 请求 / 响应 / content / generation / tool / endpoint / accumulator / count_tokens
+├── airx-transport/src/
+│   ├── transport.rs          # Transport / BoxFuture
+│   ├── native.rs             # ReqwestTransport
+│   ├── wasm.rs               # WasmTransport
+│   ├── mock.rs               # MockTransport
+│   ├── retry.rs              # RetryPolicy / RetryTransport
+│   ├── middleware.rs         # Middleware / MiddlewareTransport
+│   ├── response.rs           # HttpStreamResponse / ResponseMetadata
+│   └── stream.rs             # ByteStream / byte_stream
+└── airx/src/
+    ├── client.rs             # Client 命名空间
+    ├── builder.rs            # ClientBuilder / Provider 构建器
+    ├── executor.rs           # Executor（执行级 Header + Transport + 请求选项）
+    ├── api.rs                # ApiClient（encode → execute → decode / meta）
+    ├── options.rs            # RequestOptions（Header / Idempotency-Key）
+    ├── response.rs           # ResponseMeta / StreamMeta / WithMeta / parse_json
+    ├── stream.rs             # ProtocolStream + Stream impl + final_* 助手
+    ├── openai.rs             # OpenAi / Chat / Responses / OpenAiModels
+    ├── anthropic.rs          # Anthropic / Messages / AnthropicModels
+    ├── gemini.rs             # Gemini / GenerateContent / GeminiModels
+    └── prelude.rs            # 常用类型导出
+```

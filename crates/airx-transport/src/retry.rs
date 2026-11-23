@@ -1,6 +1,7 @@
 //! 重试策略与执行。
 //!
-//! 设计原则：**默认不重试**，且按幂等性区分。
+//! 设计原则：native 默认 2 次重试（对齐官方 SDK），且按幂等性区分；
+//! WASM 暂不支持自动重试，默认关闭。
 //!
 //! | 情况 | 是否重试 |
 //! | --- | --- |
@@ -31,7 +32,7 @@ pub struct RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// 禁用重试（客户端默认）。
+    /// 禁用重试（逃生开关）。
     pub const fn disabled() -> Self {
         Self {
             max_retries: 0,
@@ -86,7 +87,14 @@ impl RetryPolicy {
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        Self::disabled()
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::disabled()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self::standard()
+        }
     }
 }
 
@@ -242,9 +250,14 @@ mod tests {
     }
 
     #[test]
-    fn default_is_disabled() {
-        assert!(!RetryPolicy::default().is_enabled());
+    fn default_matches_platform_policy() {
         assert!(RetryPolicy::standard().is_enabled());
+        assert!(!RetryPolicy::disabled().is_enabled());
+
+        #[cfg(not(target_arch = "wasm32"))]
+        assert!(RetryPolicy::default().is_enabled());
+        #[cfg(target_arch = "wasm32")]
+        assert!(!RetryPolicy::default().is_enabled());
     }
 }
 

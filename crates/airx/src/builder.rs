@@ -18,6 +18,7 @@ use crate::executor::Executor;
 pub struct ClientBuilder {
     transport: Option<Arc<dyn Transport>>,
     timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
     retry_policy: RetryPolicy,
     default_headers: HeaderMap,
 }
@@ -27,14 +28,15 @@ impl Default for ClientBuilder {
         Self {
             transport: None,
             timeout: None,
-            retry_policy: RetryPolicy::disabled(),
+            connect_timeout: None,
+            retry_policy: RetryPolicy::default(),
             default_headers: HeaderMap::new(),
         }
     }
 }
 
 impl ClientBuilder {
-    /// 创建默认构建器（重试默认关闭）。
+    /// 创建默认构建器（native 默认 2 次重试、10 秒连接超时）。
     pub fn new() -> Self {
         Self::default()
     }
@@ -46,14 +48,23 @@ impl ClientBuilder {
         self
     }
 
-    /// 设置请求超时（仅在使用内置 native Transport 时生效）。
+    /// 设置整体请求超时（仅在使用内置 native Transport 时生效）。
+    ///
+    /// 这是总时长，长流会被截断；一般只需调整连接超时。
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
     }
 
-    /// 设置重试策略（默认关闭）。
+    /// 设置连接超时（默认 10 秒，仅在使用内置 native Transport 时生效）。
+    #[must_use]
+    pub fn connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = Some(connect_timeout);
+        self
+    }
+
+    /// 设置重试策略（native 默认 [`RetryPolicy::standard`]，可显式禁用）。
     #[must_use]
     pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
         self.retry_policy = retry_policy;
@@ -109,7 +120,7 @@ impl ClientBuilder {
     pub(crate) fn build_executor(self) -> Result<Arc<Executor>, AirxError> {
         let transport = match self.transport {
             Some(transport) => transport,
-            None => default_transport(self.timeout)?,
+            None => default_transport(self.timeout, self.connect_timeout)?,
         };
         let transport = apply_retry(transport, self.retry_policy)?;
         Ok(Arc::new(Executor::new(transport, self.default_headers)))
@@ -117,16 +128,25 @@ impl ClientBuilder {
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-fn default_transport(timeout: Option<Duration>) -> Result<Arc<dyn Transport>, AirxError> {
+fn default_transport(
+    timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
+) -> Result<Arc<dyn Transport>, AirxError> {
     let mut builder = airx_transport::ReqwestTransport::builder();
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
+    }
+    if let Some(connect_timeout) = connect_timeout {
+        builder = builder.connect_timeout(connect_timeout);
     }
     Ok(Arc::new(builder.build()?))
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
-fn default_transport(_timeout: Option<Duration>) -> Result<Arc<dyn Transport>, AirxError> {
+fn default_transport(
+    _timeout: Option<Duration>,
+    _connect_timeout: Option<Duration>,
+) -> Result<Arc<dyn Transport>, AirxError> {
     Ok(Arc::new(airx_transport::WasmTransport::new()))
 }
 
@@ -134,7 +154,10 @@ fn default_transport(_timeout: Option<Duration>) -> Result<Arc<dyn Transport>, A
     all(feature = "native", not(target_arch = "wasm32")),
     all(target_arch = "wasm32", feature = "wasm")
 )))]
-fn default_transport(_timeout: Option<Duration>) -> Result<Arc<dyn Transport>, AirxError> {
+fn default_transport(
+    _timeout: Option<Duration>,
+    _connect_timeout: Option<Duration>,
+) -> Result<Arc<dyn Transport>, AirxError> {
     Err(AirxError::Configuration(ConfigurationError::new(
         "未提供 Transport，且当前未启用 native / wasm feature",
     )))

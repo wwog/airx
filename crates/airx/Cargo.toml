@@ -34,12 +34,14 @@ json = ["airx-core/json"]
 airx-core = { path = "../airx-core", default-features = false }
 airx-protocol = { path = "../airx-protocol", default-features = false }
 airx-transport = { path = "../airx-transport", default-features = false }
+futures-core.workspace = true
 futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-serde_json.workspace = true
-bytes.workspace = true
 dotenvy.workspace = true
 
 [[example]]

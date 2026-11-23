@@ -60,6 +60,7 @@
 | 流式事件：message_start / content_block_start·delta·stop / message_delta / message_stop / ping / error | 已实现 |
 | 流式未知事件 | `Unknown(Value)`；`ping` 在协议层过滤 |
 | 聚合：`MessagesStreamAccumulator`（tool 参数增量拼接后解析） | 已实现 |
+| 计 token：`POST {messages_path}/count_tokens` | 已实现 |
 
 `output_config` / `thinking` 的 `display` 等新字段已建模；账号级参数
 （`inference_geo` / `service_tier` / `speed` / `workspace_id` 等）暂通过 `extensions` 透传。
@@ -84,7 +85,9 @@ Gemini 的模型位于路径中（`/models/{model}:generateContent`），因此
 | 错误体：`error.code` / `message` / `status` / `details` → ProviderError | 已实现 |
 | 流式：`alt=sse`，每个 data 为 `GenerateContentResponse` 增量 | 已实现 |
 | 聚合：`GenerateContentStreamAccumulator`（文本按 thought 标记合并；`finishReason` 或 `blockReason` 判定完成） | 已实现 |
-| 未覆盖：`countTokens`、模型列表、Vertex AI 专属参数 | 未封装；用 Raw 扩展字段 / 原生 Endpoint |
+| 计 token：`POST /models/{model}:countTokens` | 已实现 |
+| 模型列表：`GET /models`（pageSize / pageToken）/ `GET /models/{model}` | 已实现 |
+| 未覆盖：Vertex AI 专属参数、Live API | 未封装；用 Raw 扩展字段 / 原生 Endpoint |
 
 Gemini 流没有 `[DONE]` 哨兵。`finish()` 只有在收到候选的 `finishReason`
 （或输入被拦截的 `promptFeedback.blockReason`）时才返回成功；EOF 提前发生返回
@@ -93,6 +96,16 @@ Gemini 流没有 `[DONE]` 哨兵。`finish()` 只有在收到候选的 `finishRe
 认证使用 `x-goog-api-key`（不把 key 放进 URL）；默认基地址
 `https://generativelanguage.googleapis.com/v1beta`。模型可写 `gemini-2.5-flash`、
 `models/gemini-2.5-flash`、`tunedModels/...`，端点会规范化路径。
+
+## 模型列表
+
+| Provider | 端点 | 分页 |
+| --- | --- | --- |
+| OpenAI | `GET /models` / `GET /models/{model}` | 无分页 |
+| Anthropic | `GET /v1/models` / `GET /v1/models/{id}` | `limit` + `after_id` / `before_id`；`list_all()` 自动翻页 |
+| Gemini | `GET /models` / `GET /models/{model}` | `pageSize` + `pageToken`；`list_all()` 自动翻页 |
+
+未知字段通过 `extensions` 保留。
 
 ## 兼容部署：DeepSeek
 

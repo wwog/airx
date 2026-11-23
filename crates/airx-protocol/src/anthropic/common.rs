@@ -44,8 +44,9 @@ pub(crate) fn error_from_response(
             error.status = Some(status.as_u16());
             error.code = envelope.error.kind;
             error.request_id = request_id(headers);
+            error.headers = headers.clone();
             error.raw_body = raw_body;
-            return AirxError::Provider(error);
+            return AirxError::Provider(Box::new(error));
         }
     }
 
@@ -64,7 +65,7 @@ pub(crate) fn error_from_event_value(provider: &ProviderId, value: Value) -> Air
         let mut error = ProviderError::new(provider.clone(), envelope.error.message);
         error.code = envelope.error.kind;
         error.raw_body = raw_body;
-        return AirxError::Provider(error);
+        return AirxError::Provider(Box::new(error));
     }
     AirxError::Deserialization(airx_core::error::DeserializationError::new(
         "无法解析 Anthropic 流错误事件",

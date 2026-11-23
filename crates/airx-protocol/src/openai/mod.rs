@@ -6,6 +6,7 @@
 pub mod chat;
 pub mod common;
 pub mod config;
+pub mod models;
 pub mod responses;
 
 pub use config::OpenAiConfig;

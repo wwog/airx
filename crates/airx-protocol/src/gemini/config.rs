@@ -7,7 +7,7 @@ use std::fmt;
 
 use airx_core::AirxError;
 use airx_core::error::ConfigurationError;
-use airx_core::http::{HeaderMap, HeaderName, HeaderValue, Uri};
+use airx_core::http::{HeaderMap, HeaderName, HeaderValue, HttpRequest, Uri};
 
 /// 官方 API 基地址（已包含 API 版本）。
 pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -68,6 +68,29 @@ impl GeminiConfig {
     /// Provider 级默认 Header。
     pub fn default_headers(&self) -> &HeaderMap {
         &self.default_headers
+    }
+
+    /// 解析任意相对路径（或完整 URL）。
+    pub(crate) fn resolve_path(&self, path: &str, label: &str) -> Result<Uri, AirxError> {
+        crate::internal::url::endpoint_uri(&self.base_url, path, &format!("Gemini {label}"))
+    }
+
+    /// 写入认证与 Provider 级默认 Header。
+    pub(crate) fn apply_headers(&self, http: &mut HttpRequest) -> Result<(), AirxError> {
+        http.headers.insert(
+            HeaderName::from_static("x-goog-api-key"),
+            HeaderValue::from_str(&self.api_key).map_err(|error| {
+                AirxError::Configuration(ConfigurationError::new(format!(
+                    "Gemini api_key 无法作为 HTTP Header: {error}"
+                )))
+            })?,
+        );
+
+        for (name, value) in &self.default_headers {
+            http.headers.insert(name.clone(), value.clone());
+        }
+
+        Ok(())
     }
 }
 

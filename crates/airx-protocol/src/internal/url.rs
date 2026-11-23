@@ -51,6 +51,11 @@ pub(crate) fn endpoint_uri(base_url: &str, path: &str, label: &str) -> Result<Ur
     let url = if is_absolute_url(path) {
         path.to_owned()
     } else {
+        let path = if path.starts_with('/') {
+            path.to_owned()
+        } else {
+            format!("/{path}")
+        };
         format!("{}{}", base_url.trim_end_matches('/'), path)
     };
 

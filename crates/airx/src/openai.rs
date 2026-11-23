@@ -6,14 +6,21 @@
 use std::sync::Arc;
 
 use airx_core::AirxError;
+use airx_core::model::ModelId;
 use airx_protocol::openai::OpenAiConfig;
 use airx_protocol::openai::chat::{
     ChatCompletionRequest, ChatCompletionResponse, ChatEndpoint, StreamOptions,
 };
+use airx_protocol::openai::models::{
+    ListModels, ListModelsEndpoint, Model, ModelList, RetrieveModelEndpoint,
+};
 use airx_protocol::openai::responses::{ResponsesEndpoint, ResponsesRequest, ResponsesResponse};
+use serde::de::DeserializeOwned;
 
 use crate::api::ApiClient;
 use crate::executor::Executor;
+use crate::options::RequestOptions;
+use crate::response::{WithMeta, parse_json};
 #[cfg(feature = "stream")]
 use crate::stream::ProtocolStream;
 
@@ -58,12 +65,22 @@ impl OpenAi {
         Ok(self.responses_with(&config))
     }
 
+    /// Models API。
+    pub fn models(&self) -> OpenAiModels {
+        OpenAiModels {
+            executor: Arc::clone(&self.executor),
+            config: self.config.clone(),
+            options: RequestOptions::default(),
+        }
+    }
+
     fn chat_with(&self, config: &OpenAiConfig) -> Chat {
         Chat {
             api: ApiClient::new(
                 ChatEndpoint::new(config.clone()),
                 Arc::clone(&self.executor),
             ),
+            options: RequestOptions::default(),
         }
     }
 
@@ -73,6 +90,7 @@ impl OpenAi {
                 ResponsesEndpoint::new(config.clone()),
                 Arc::clone(&self.executor),
             ),
+            options: RequestOptions::default(),
         }
     }
 }
@@ -81,15 +99,42 @@ impl OpenAi {
 #[derive(Clone)]
 pub struct Chat {
     api: ApiClient<ChatEndpoint>,
+    options: RequestOptions,
 }
 
 impl Chat {
+    /// 设置本次调用的请求选项（Header / 幂等键）。
+    #[must_use]
+    pub fn with_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
     /// 创建一次非流式对话补全。
     pub async fn create(
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, AirxError> {
-        self.api.create(&request).await
+        self.api.create_with(&request, &self.options).await
+    }
+
+    /// 创建一次非流式对话补全，同时返回 HTTP 元数据。
+    pub async fn create_with_meta(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<WithMeta<ChatCompletionResponse>, AirxError> {
+        self.api.create_with_meta(&request, &self.options).await
+    }
+
+    /// 创建并解析结构化输出。
+    ///
+    /// 调用方需自行设置 `response_format`；本方法只负责把文本解析为 `T`。
+    pub async fn parse_as<T: DeserializeOwned>(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<T, AirxError> {
+        let response = self.create(request).await?;
+        parse_json(response.first_content().unwrap_or_default())
     }
 
     /// 端点引用（可用于自定义编码 / 逃生通道）。
@@ -111,7 +156,7 @@ impl Chat {
                 include_usage: true,
             });
         }
-        self.api.stream(&request).await
+        self.api.stream_with(&request, &self.options).await
     }
 }
 
@@ -119,12 +164,37 @@ impl Chat {
 #[derive(Clone)]
 pub struct Responses {
     api: ApiClient<ResponsesEndpoint>,
+    options: RequestOptions,
 }
 
 impl Responses {
+    /// 设置本次调用的请求选项（Header / 幂等键）。
+    #[must_use]
+    pub fn with_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
     /// 创建一次非流式响应。
     pub async fn create(&self, request: ResponsesRequest) -> Result<ResponsesResponse, AirxError> {
-        self.api.create(&request).await
+        self.api.create_with(&request, &self.options).await
+    }
+
+    /// 创建一次非流式响应，同时返回 HTTP 元数据。
+    pub async fn create_with_meta(
+        &self,
+        request: ResponsesRequest,
+    ) -> Result<WithMeta<ResponsesResponse>, AirxError> {
+        self.api.create_with_meta(&request, &self.options).await
+    }
+
+    /// 创建并解析结构化输出（读取 `output_text`）。
+    pub async fn parse_as<T: DeserializeOwned>(
+        &self,
+        request: ResponsesRequest,
+    ) -> Result<T, AirxError> {
+        let response = self.create(request).await?;
+        parse_json(&response.output_text())
     }
 
     /// 端点引用。
@@ -139,6 +209,42 @@ impl Responses {
         mut request: ResponsesRequest,
     ) -> Result<ProtocolStream<ResponsesEndpoint>, AirxError> {
         request.stream = Some(true);
-        self.api.stream(&request).await
+        self.api.stream_with(&request, &self.options).await
+    }
+}
+
+/// OpenAI Models 调用入口。
+#[derive(Clone)]
+pub struct OpenAiModels {
+    executor: Arc<Executor>,
+    config: OpenAiConfig,
+    options: RequestOptions,
+}
+
+impl OpenAiModels {
+    /// 设置本次调用的请求选项。
+    #[must_use]
+    pub fn with_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// 列出全部模型（该接口不分页）。
+    pub async fn list(&self) -> Result<ModelList, AirxError> {
+        let api = ApiClient::new(
+            ListModelsEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&ListModels, &self.options).await
+    }
+
+    /// 获取单个模型。
+    pub async fn retrieve(&self, model: impl Into<ModelId>) -> Result<Model, AirxError> {
+        let api = ApiClient::new(
+            RetrieveModelEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let model = model.into();
+        api.create_with(&model, &self.options).await
     }
 }

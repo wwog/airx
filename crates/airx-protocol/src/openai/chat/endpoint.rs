@@ -1,8 +1,8 @@
 //! Chat Completions 端点：编码 / 解码（纯函数）。
 
 use airx_core::AirxError;
-use airx_core::error::{ConfigurationError, DeserializationError, SerializationError};
-use airx_core::http::{HeaderName, HeaderValue, HttpRequest, HttpResponse, Uri, header};
+use airx_core::error::{DeserializationError, SerializationError};
+use airx_core::http::{HeaderValue, HttpRequest, HttpResponse, Uri, header};
 use airx_core::model::ProviderId;
 use airx_core::stream::RawEvent;
 use serde_json::Value;
@@ -54,30 +54,7 @@ impl Endpoint for ChatEndpoint {
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         );
-
-        let authorization = format!("Bearer {}", self.config.api_key);
-        http.headers.insert(
-            header::AUTHORIZATION,
-            header_value(&authorization, "api_key")?,
-        );
-
-        if let Some(organization) = self.config.organization() {
-            http.headers.insert(
-                HeaderName::from_static("openai-organization"),
-                header_value(organization, "organization")?,
-            );
-        }
-
-        if let Some(project) = self.config.project() {
-            http.headers.insert(
-                HeaderName::from_static("openai-project"),
-                header_value(project, "project")?,
-            );
-        }
-
-        for (name, value) in self.config.default_headers() {
-            http.headers.insert(name.clone(), value.clone());
-        }
+        self.config.apply_headers(&mut http)?;
 
         Ok(http)
     }
@@ -116,12 +93,4 @@ impl StreamingEndpoint for ChatEndpoint {
             .map_err(|error| AirxError::Deserialization(DeserializationError::from(error)))?;
         Ok(Some(ChatStreamEvent::Chunk(chunk)))
     }
-}
-
-fn header_value(value: &str, field: &str) -> Result<HeaderValue, AirxError> {
-    HeaderValue::from_str(value).map_err(|error| {
-        AirxError::Configuration(ConfigurationError::new(format!(
-            "OpenAI {field} 无法作为 HTTP Header: {error}"
-        )))
-    })
 }

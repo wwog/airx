@@ -2,6 +2,7 @@
 
 mod accumulator;
 mod content;
+mod count_tokens;
 mod endpoint;
 mod generation;
 mod request;
@@ -13,6 +14,10 @@ pub use content::{
     CodeExecutionResultPart, Content, ExecutableCodePart, FileDataPart, FunctionCallPart,
     FunctionResponsePart, InlineDataPart, Part, Role, TextPart,
 };
+pub use count_tokens::{
+    CountTokensEndpoint, CountTokensRequest, CountTokensRequestBuilder, CountTokensResponse,
+};
+pub(crate) use endpoint::model_path;
 pub use endpoint::{
     GENERATE_CONTENT_SUFFIX, GenerateContentEndpoint, GenerateContentMode,
     STREAM_GENERATE_CONTENT_SUFFIX,

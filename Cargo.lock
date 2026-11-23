@@ -11,7 +11,9 @@ dependencies = [
  "airx-transport",
  "bytes",
  "dotenvy",
+ "futures-core",
  "futures-util",
+ "serde",
  "serde_json",
  "tokio",
 ]

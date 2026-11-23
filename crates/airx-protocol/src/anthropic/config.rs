@@ -4,7 +4,7 @@ use std::fmt;
 
 use airx_core::AirxError;
 use airx_core::error::ConfigurationError;
-use airx_core::http::{HeaderMap, HeaderName, HeaderValue, Uri};
+use airx_core::http::{HeaderMap, HeaderName, HeaderValue, HttpRequest, Uri};
 
 use crate::internal::url::{endpoint_path, endpoint_uri};
 
@@ -102,6 +102,42 @@ impl AnthropicConfig {
     pub(crate) fn endpoint_uri(&self) -> Result<Uri, AirxError> {
         endpoint_uri(&self.base_url, &self.messages_path, "Anthropic Messages")
     }
+
+    /// 解析任意相对路径（或完整 URL）。
+    pub(crate) fn resolve_path(&self, path: &str, label: &str) -> Result<Uri, AirxError> {
+        endpoint_uri(&self.base_url, path, &format!("Anthropic {label}"))
+    }
+
+    /// countTokens 路径：跟随 Messages 路径。
+    pub fn count_tokens_path(&self) -> String {
+        format!("{}/count_tokens", self.messages_path.trim_end_matches('/'))
+    }
+
+    /// 写入认证、版本与 Provider 级默认 Header。
+    pub(crate) fn apply_headers(&self, http: &mut HttpRequest) -> Result<(), AirxError> {
+        http.headers.insert(
+            HeaderName::from_static("x-api-key"),
+            header_value(&self.api_key, "api_key")?,
+        );
+        http.headers.insert(
+            HeaderName::from_static("anthropic-version"),
+            header_value(&self.api_version, "api_version")?,
+        );
+
+        for (name, value) in &self.default_headers {
+            http.headers.insert(name.clone(), value.clone());
+        }
+
+        Ok(())
+    }
+}
+
+fn header_value(value: &str, field: &str) -> Result<HeaderValue, AirxError> {
+    HeaderValue::from_str(value).map_err(|error| {
+        AirxError::Configuration(ConfigurationError::new(format!(
+            "Anthropic {field} 无法作为 HTTP Header: {error}"
+        )))
+    })
 }
 
 impl fmt::Debug for AnthropicConfig {

@@ -35,23 +35,37 @@ impl ReqwestTransport {
     }
 }
 
+/// 默认连接超时（只约束建连，不会截断长流）。
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// [`ReqwestTransport`] 构建器。
 #[derive(Debug, Default)]
 pub struct ReqwestTransportBuilder {
     timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
 }
 
 impl ReqwestTransportBuilder {
     /// 设置整体请求超时。
+    ///
+    /// 注意：这是总时长，流式响应也会被限制；长流请依赖连接超时。
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
     }
 
+    /// 设置连接超时（默认 10 秒）。
+    #[must_use]
+    pub fn connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = Some(connect_timeout);
+        self
+    }
+
     /// 构建传输实现。
     pub fn build(self) -> Result<ReqwestTransport, TransportError> {
-        let mut builder = reqwest::Client::builder();
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(self.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT));
         if let Some(timeout) = self.timeout {
             builder = builder.timeout(timeout);
         }

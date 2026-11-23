@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 校验 crate 依赖方向，规则见 docs/architecture.md §4.3。
+# 校验 crate 依赖方向，规则见 docs/architecture.md §2.2。
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -40,7 +40,7 @@ for pkg in meta["packages"]:
             problems.append(f"{name} -> {dep_name}")
 
 if problems:
-    print("非法的 workspace 依赖方向（见 docs/architecture.md §4.3）：", file=sys.stderr)
+    print("非法的 workspace 依赖方向（见 docs/architecture.md §2.2）：", file=sys.stderr)
     for problem in problems:
         print(f"  {problem}", file=sys.stderr)
     sys.exit(1)

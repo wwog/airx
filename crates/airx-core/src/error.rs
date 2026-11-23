@@ -8,7 +8,9 @@
 
 use std::error::Error as StdError;
 use std::fmt;
+use std::time::Duration;
 
+use crate::http::HeaderMap;
 use crate::json::raw::RawJson;
 use crate::model::ProviderId;
 
@@ -46,8 +48,10 @@ pub enum AirxError {
     Deserialization(#[from] DeserializationError),
 
     /// Provider 返回的可识别错误。
+    ///
+    /// 装箱以避免撑大整个 [`AirxError`]（Provider 错误携带 Header 与原始 body）。
     #[error(transparent)]
-    Provider(#[from] ProviderError),
+    Provider(Box<ProviderError>),
 
     /// SSE / 流状态错误。
     #[error(transparent)]
@@ -56,6 +60,12 @@ pub enum AirxError {
     /// 客户端配置错误。
     #[error(transparent)]
     Configuration(#[from] ConfigurationError),
+}
+
+impl From<ProviderError> for AirxError {
+    fn from(error: ProviderError) -> Self {
+        Self::Provider(Box::new(error))
+    }
 }
 
 impl AirxError {
@@ -78,6 +88,35 @@ impl AirxError {
             Self::Http(err) => is_retryable_status(err.status),
             Self::Provider(err) => err.status.is_some_and(is_retryable_status),
             _ => false,
+        }
+    }
+
+    /// Provider 请求 ID（若有）。
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::Provider(err) => err.request_id.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// 是否被限流（HTTP 429）。
+    pub fn is_rate_limit(&self) -> bool {
+        self.http_status() == Some(429)
+    }
+
+    /// Provider 返回的 `Retry-After`（仅支持秒数形式）。
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Provider(err) => err.retry_after(),
+            _ => None,
+        }
+    }
+
+    /// Provider 错误响应头（若有）。
+    pub fn response_headers(&self) -> Option<&HeaderMap> {
+        match self {
+            Self::Provider(err) => Some(&err.headers),
+            _ => None,
         }
     }
 }
@@ -203,7 +242,7 @@ impl StdError for HttpError {}
 
 /// Provider 返回的可识别错误。
 ///
-/// 保留 `status` / `code` / `request_id` / 原始响应体，
+/// 保留 `status` / `code` / `request_id` / 响应头 / 原始响应体，
 /// 使调用方可以区分限流、参数错误、服务端故障与网络问题。
 #[derive(Debug)]
 pub struct ProviderError {
@@ -217,6 +256,8 @@ pub struct ProviderError {
     pub message: String,
     /// Provider 请求 ID，便于对账。
     pub request_id: Option<String>,
+    /// 错误响应头（限流信息、request id 等）。
+    pub headers: HeaderMap,
     /// 原始错误响应体。
     pub raw_body: Option<RawJson>,
 }
@@ -230,6 +271,7 @@ impl ProviderError {
             code: None,
             message: message.into(),
             request_id: None,
+            headers: HeaderMap::new(),
             raw_body: None,
         }
     }
@@ -237,6 +279,15 @@ impl ProviderError {
     /// 是否被限流。
     pub fn is_rate_limited(&self) -> bool {
         self.status == Some(429)
+    }
+
+    /// `Retry-After`（仅支持秒数形式）。
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.headers
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(Duration::from_secs)
     }
 }
 

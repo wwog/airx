@@ -1,6 +1,7 @@
 //! Anthropic Messages API。
 
 mod accumulator;
+mod count_tokens;
 mod endpoint;
 mod event;
 mod message;
@@ -8,6 +9,9 @@ mod request;
 mod response;
 
 pub use accumulator::MessagesStreamAccumulator;
+pub use count_tokens::{
+    CountTokensEndpoint, CountTokensRequest, CountTokensRequestBuilder, CountTokensResponse,
+};
 pub use endpoint::{MESSAGES_PATH, MessagesEndpoint};
 pub use event::{
     ContentBlockDelta, ContentBlockStart, ContentBlockStop, Delta, ErrorBody, ErrorEvent,

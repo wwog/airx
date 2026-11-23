@@ -19,7 +19,7 @@ pub mod wasm;
 pub use middleware::{Middleware, MiddlewareTransport};
 pub use mock::MockTransport;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-pub use native::{ReqwestTransport, ReqwestTransportBuilder};
+pub use native::{DEFAULT_CONNECT_TIMEOUT, ReqwestTransport, ReqwestTransportBuilder};
 pub use response::{HttpStreamResponse, ResponseMetadata, extract_request_id};
 pub use retry::RetryPolicy;
 #[cfg(not(target_arch = "wasm32"))]

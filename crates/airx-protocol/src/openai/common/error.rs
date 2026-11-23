@@ -62,8 +62,9 @@ pub(crate) fn error_from_response(
             error.status = Some(status.as_u16());
             error.code = code;
             error.request_id = request_id(headers);
+            error.headers = headers.clone();
             error.raw_body = raw_body;
-            return AirxError::Provider(error);
+            return AirxError::Provider(Box::new(error));
         }
     }
 
@@ -85,7 +86,7 @@ pub(crate) fn error_from_stream_value(provider: &ProviderId, value: Value) -> Ai
         let mut error = ProviderError::new(provider.clone(), body.message);
         error.code = code;
         error.raw_body = raw_body;
-        return AirxError::Provider(error);
+        return AirxError::Provider(Box::new(error));
     }
 
     AirxError::Deserialization(DeserializationError::new("无法解析流式错误事件"))

@@ -137,7 +137,7 @@ async fn execution_headers_do_not_override_protocol_headers() {
 }
 
 #[tokio::test]
-async fn retry_is_disabled_by_default() {
+async fn post_500_is_not_retried() {
     let mock = MockTransport::new();
     mock.push_json(500, "{}");
 

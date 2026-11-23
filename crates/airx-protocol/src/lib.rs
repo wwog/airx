@@ -6,7 +6,7 @@
 //! `airx_core::http::HttpRequest`，由 `airx-transport` 执行。
 
 pub mod endpoint;
-#[cfg(any(feature = "openai", feature = "anthropic"))]
+#[cfg(any(feature = "openai", feature = "anthropic", feature = "gemini"))]
 mod internal;
 
 #[cfg(feature = "anthropic")]

@@ -14,7 +14,8 @@
 
 ## 2. 重试
 
-默认**关闭**（`RetryPolicy::disabled()`）。启用后按幂等性决策：
+native 默认 2 次（`RetryPolicy::standard()`），WASM 默认关闭；可用
+`RetryPolicy::disabled()` 显式关闭。启用后按幂等性决策：
 
 | 结果 | 重试条件 |
 | --- | --- |
@@ -25,15 +26,21 @@
 | 取消（Cancelled） | 不重试 |
 | 流式请求 | 不重试 |
 
-退避为指数增长（`initial × 2^n`，上限 `max_backoff`）。WASM 目标暂不支持自动重试，启用会返回配置错误。
+退避为指数增长（`initial × 2^n`，上限 `max_backoff`）。WASM 目标暂不支持自动重试，
+显式启用会返回配置错误。默认连接超时 10 秒；整体超时默认关闭，避免截断长流。
 
 ## 3. Header 优先级
 
-1. 协议层写入（认证、`content-type`、Provider 版本 / Beta Header）。
-2. Provider 配置的 `default_headers`（覆盖同名协议 Header）。
-3. 执行级 `default_headers`（**不覆盖**已存在的 Header）。
+从高到低：
 
-敏感 Header（`authorization`、`x-api-key` 等）不会出现在日志中；错误结构只保留状态码、错误码、request id 与原始响应体。
+1. 单次请求 `RequestOptions`（覆盖同名 Header，可设置 `Idempotency-Key`）。
+2. Provider 配置的 `default_headers`（覆盖同名协议 Header）。
+3. 协议层写入（认证、`content-type`、Provider 版本 / Beta Header）。
+4. 执行级 `default_headers`（**不覆盖**已存在的 Header）。
+5. 缺省 `User-Agent: airx/<version>` 与按调用模式设置的 `Accept`。
+
+敏感 Header（`authorization`、`x-api-key` 等）不会出现在日志中；错误结构保留
+状态码、错误码、request id、响应头与原始响应体。
 
 ## 4. base_url 约定
 
@@ -154,3 +161,34 @@ Anthropic-Compatible 部署请使用 Anthropic Native API。`thinking` /
 
 参数对齐会随官方版本演进；发现模型行为变化时，优先更新本节与
 [protocol-support.md](protocol-support.md)，再改代码。
+
+## 9. SDK 体验层
+
+在不引入统一请求模型的前提下，门面提供与官方 SDK 对齐的便利能力：
+
+```rust
+// 单次请求选项
+let chat = client.chat().with_options(
+    RequestOptions::new()
+        .try_header("x-trace-id", "trace-1")?
+        .idempotency_key("idem-1"),
+);
+
+// 响应元数据（status / headers / request id / raw body）
+let response = chat.create_with_meta(request).await?;
+println!("{} {}", response.meta.status, response.meta.request_id.unwrap_or_default());
+
+// 结构化输出
+let parsed: MyType = client.chat().parse_as(request).await?;
+
+// 流：futures::Stream + 一次性收尾
+use futures_util::TryStreamExt;
+let mut stream = client.chat().stream(request).await?;
+while let Some(event) = stream.try_next().await? { /* ... */ }
+```
+
+- `ProtocolStream` 实现 `futures_core::Stream`，可直接使用 `TryStreamExt`、`select!`。
+- 各协议提供 `final_response()` / `final_text()`，内部驱动对应 Accumulator。
+- 模型列表：`client.models().list() / retrieve()`；Anthropic / Gemini 支持 `list_all()`。
+- 计 token：Anthropic `messages().count_tokens()`、Gemini `generate_content(m).count_tokens()`。
+- `parse_as<T>` 只负责 serde 解析；schema 仍由调用方通过各协议字段设置。

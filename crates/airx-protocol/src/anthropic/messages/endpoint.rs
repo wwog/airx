@@ -1,8 +1,8 @@
 //! Anthropic Messages 端点。
 
 use airx_core::AirxError;
-use airx_core::error::{ConfigurationError, DeserializationError, SerializationError};
-use airx_core::http::{HeaderName, HeaderValue, HttpRequest, HttpResponse, Uri, header};
+use airx_core::error::{DeserializationError, SerializationError};
+use airx_core::http::{HeaderValue, HttpRequest, HttpResponse, Uri, header};
 use airx_core::model::ProviderId;
 use airx_core::stream::RawEvent;
 use serde_json::Value;
@@ -53,18 +53,7 @@ impl Endpoint for MessagesEndpoint {
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         );
-        http.headers.insert(
-            HeaderName::from_static("x-api-key"),
-            header_value(&self.config.api_key, "api_key")?,
-        );
-        http.headers.insert(
-            HeaderName::from_static("anthropic-version"),
-            header_value(self.config.api_version(), "api_version")?,
-        );
-
-        for (name, value) in self.config.default_headers() {
-            http.headers.insert(name.clone(), value.clone());
-        }
+        self.config.apply_headers(&mut http)?;
 
         Ok(http)
     }
@@ -106,12 +95,4 @@ impl StreamingEndpoint for MessagesEndpoint {
             }
         }
     }
-}
-
-fn header_value(value: &str, field: &str) -> Result<HeaderValue, AirxError> {
-    HeaderValue::from_str(value).map_err(|error| {
-        AirxError::Configuration(ConfigurationError::new(format!(
-            "Anthropic {field} 无法作为 HTTP Header: {error}"
-        )))
-    })
 }
