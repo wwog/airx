@@ -4,8 +4,7 @@ members = [
     "crates/airx-core",
     "crates/airx-protocol",
     "crates/airx-transport",
-    "crates/airx",
-    "examples/deepseek-agent",
+    "crates/airx"
 ]
 
 [workspace.package]
