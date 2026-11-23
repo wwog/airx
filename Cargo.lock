@@ -194,6 +194,12 @@ dependencies = [
 [[package]]
 name = "deepseek-agent"
 version = "0.1.0"
+dependencies = [
+ "bytes",
+ "dotenvy",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "displaydoc"
