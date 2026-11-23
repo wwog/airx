@@ -35,26 +35,15 @@ pub fn capabilities(provider: &ProviderId, model: &ModelId) -> ModelCapabilities
         };
     }
 
-    if provider == &ProviderId::deepseek() && name.contains("reasoner") {
-        return ModelCapabilities {
-            streaming: CapabilitySupport::Supported,
-            tools: CapabilitySupport::Unsupported,
-            vision: CapabilitySupport::Unsupported,
-            audio: CapabilitySupport::Unsupported,
-            structured_output: CapabilitySupport::Unsupported,
-            reasoning: CapabilitySupport::Supported,
-            prompt_caching: CapabilitySupport::Unsupported,
-        };
-    }
-
-    if provider == &ProviderId::deepseek() && name.contains("chat") {
+    // DeepSeek 是 OpenAI / Anthropic 兼容部署，ProviderId 仅作为元数据标签。
+    if provider == &ProviderId::deepseek() && (name.contains("flash") || name.contains("v4-pro")) {
         return ModelCapabilities {
             streaming: CapabilitySupport::Supported,
             tools: CapabilitySupport::Supported,
             vision: CapabilitySupport::Unsupported,
             audio: CapabilitySupport::Unsupported,
             structured_output: CapabilitySupport::ModelDependent,
-            reasoning: CapabilitySupport::Unsupported,
+            reasoning: CapabilitySupport::Supported,
             prompt_caching: CapabilitySupport::Unsupported,
         };
     }
@@ -72,9 +61,9 @@ mod tests {
         assert!(caps.tools.is_supported());
         assert!(caps.streaming.is_supported());
 
-        let caps = capabilities(&ProviderId::deepseek(), &ModelId::new("deepseek-reasoner"));
+        let caps = capabilities(&ProviderId::deepseek(), &ModelId::new("deepseek-flash"));
         assert!(caps.reasoning.is_supported());
-        assert_eq!(caps.tools, CapabilitySupport::Unsupported);
+        assert!(caps.tools.is_supported());
     }
 
     #[test]

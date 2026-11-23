@@ -21,8 +21,7 @@ wasm = ["airx-transport/wasm"]
 # Provider
 openai = ["airx-protocol/openai", "airx-unified?/openai"]
 anthropic = ["airx-protocol/anthropic", "airx-unified?/anthropic"]
-deepseek = ["airx-protocol/deepseek", "airx-unified?/deepseek"]
-all-providers = ["openai", "anthropic", "deepseek"]
+all-providers = ["openai", "anthropic"]
 
 # 能力
 stream = ["airx-core/stream", "airx-protocol/stream", "airx-transport/stream"]
@@ -69,3 +68,7 @@ required-features = ["openai", "native"]
 [[example]]
 name = "opencode_full"
 required-features = ["openai", "unified"]
+
+[[example]]
+name = "deepseek_json"
+required-features = ["openai", "anthropic"]

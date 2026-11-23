@@ -13,8 +13,6 @@ workspace = true
 default = []
 openai = []
 anthropic = []
-# DeepSeek 复用 OpenAI Chat 的底层结构（语义一致的部分），因此隐含 openai。
-deepseek = ["openai"]
 stream = []
 
 [dependencies]

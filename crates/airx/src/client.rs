@@ -2,23 +2,19 @@
 
 use std::sync::Arc;
 
-#[cfg(any(feature = "openai", feature = "anthropic", feature = "deepseek"))]
+#[cfg(any(feature = "openai", feature = "anthropic"))]
 use airx_core::AirxError;
-#[cfg(any(feature = "openai", feature = "anthropic", feature = "deepseek"))]
+#[cfg(any(feature = "openai", feature = "anthropic"))]
 use airx_core::error::ConfigurationError;
 use airx_core::http::HeaderMap;
 #[cfg(feature = "anthropic")]
 use airx_protocol::anthropic::AnthropicConfig;
-#[cfg(feature = "deepseek")]
-use airx_protocol::deepseek::DeepSeekConfig;
 #[cfg(feature = "openai")]
 use airx_protocol::openai::OpenAiConfig;
 
 #[cfg(feature = "anthropic")]
 use crate::anthropic::Anthropic;
 use crate::builder::ClientBuilder;
-#[cfg(feature = "deepseek")]
-use crate::deepseek::DeepSeek;
 use crate::executor::Executor;
 #[cfg(feature = "openai")]
 use crate::openai::OpenAi;
@@ -28,8 +24,6 @@ pub struct Client {
     pub(crate) executor: Arc<Executor>,
     #[cfg(feature = "anthropic")]
     pub(crate) anthropic: Option<AnthropicConfig>,
-    #[cfg(feature = "deepseek")]
-    pub(crate) deepseek: Option<DeepSeekConfig>,
     #[cfg(feature = "openai")]
     pub(crate) openai: Option<OpenAiConfig>,
 }
@@ -62,17 +56,6 @@ impl Client {
             ))
         })?;
         Ok(Anthropic::new(self, config))
-    }
-
-    /// 进入 DeepSeek Provider。
-    #[cfg(feature = "deepseek")]
-    pub fn deepseek(&self) -> Result<DeepSeek<'_>, AirxError> {
-        let config = self.deepseek.as_ref().ok_or_else(|| {
-            AirxError::Configuration(ConfigurationError::new(
-                "该 Client 未配置 DeepSeek Provider，请使用 Client::builder().deepseek()",
-            ))
-        })?;
-        Ok(DeepSeek::new(self, config))
     }
 
     /// 执行级默认 Header。

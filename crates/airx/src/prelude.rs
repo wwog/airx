@@ -25,8 +25,6 @@ pub use airx_protocol::anthropic::messages::{
     JsonOutputFormat, MessagesEvent, MessagesRequest, MessagesResponse, MessagesStreamAccumulator,
     OutputConfig, OutputEffort, Role, ThinkingConfig, ThinkingDisplay,
 };
-#[cfg(feature = "deepseek")]
-pub use airx_protocol::deepseek::{CompatibilityMode, DeepSeekPolicy};
 #[cfg(all(feature = "openai", feature = "stream"))]
 pub use airx_protocol::openai::chat::ChatStreamAccumulator;
 #[cfg(feature = "openai")]

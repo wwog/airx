@@ -91,17 +91,6 @@ impl ClientBuilder {
         }
     }
 
-    /// 配置 DeepSeek Provider。
-    #[cfg(feature = "deepseek")]
-    pub fn deepseek(self) -> DeepSeekBuilder {
-        DeepSeekBuilder {
-            client: self,
-            api_key: None,
-            base_url: None,
-            policy: None,
-        }
-    }
-
     /// 构建不带 Provider 的 Client（供后续 Unified 入口使用）。
     pub fn build(self) -> Result<Client, AirxError> {
         self.build_inner()
@@ -127,16 +116,6 @@ impl ClientBuilder {
         Ok(client)
     }
 
-    #[cfg(feature = "deepseek")]
-    pub(crate) fn build_with_deepseek(
-        self,
-        deepseek: Option<airx_protocol::deepseek::DeepSeekConfig>,
-    ) -> Result<Client, AirxError> {
-        let mut client = self.build_inner()?;
-        client.deepseek = deepseek;
-        Ok(client)
-    }
-
     fn build_inner(self) -> Result<Client, AirxError> {
         let transport = match self.transport {
             Some(transport) => transport,
@@ -148,8 +127,6 @@ impl ClientBuilder {
             executor: Arc::new(Executor::new(transport, self.default_headers)),
             #[cfg(feature = "anthropic")]
             anthropic: None,
-            #[cfg(feature = "deepseek")]
-            deepseek: None,
             #[cfg(feature = "openai")]
             openai: None,
         })
@@ -369,82 +346,5 @@ impl AnthropicBuilder {
         }
 
         self.client.build_with_anthropic(Some(config))
-    }
-}
-
-/// DeepSeek Provider 构建器。
-#[cfg(feature = "deepseek")]
-pub struct DeepSeekBuilder {
-    client: ClientBuilder,
-    api_key: Option<String>,
-    base_url: Option<String>,
-    policy: Option<airx_protocol::deepseek::DeepSeekPolicy>,
-}
-
-#[cfg(feature = "deepseek")]
-impl DeepSeekBuilder {
-    /// 设置 API Key（必填）。
-    #[must_use]
-    pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.api_key = Some(api_key.into());
-        self
-    }
-
-    /// 覆盖基地址。
-    #[must_use]
-    pub fn base_url(mut self, base_url: impl Into<String>) -> Self {
-        self.base_url = Some(base_url.into());
-        self
-    }
-
-    /// 设置兼容策略（默认 Strict）。
-    #[must_use]
-    pub fn policy(mut self, policy: airx_protocol::deepseek::DeepSeekPolicy) -> Self {
-        self.policy = Some(policy);
-        self
-    }
-
-    /// 使用自定义 Transport。
-    #[must_use]
-    pub fn transport<T: Transport + 'static>(mut self, transport: T) -> Self {
-        self.client = self.client.transport(transport);
-        self
-    }
-
-    /// 设置请求超时。
-    #[must_use]
-    pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.client = self.client.timeout(timeout);
-        self
-    }
-
-    /// 设置重试策略。
-    #[must_use]
-    pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
-        self.client = self.client.retry_policy(retry_policy);
-        self
-    }
-
-    /// 构建 Client。
-    pub fn build(self) -> Result<Client, AirxError> {
-        let api_key = self.api_key.ok_or_else(|| {
-            AirxError::Configuration(ConfigurationError::new("DeepSeek api_key 必填"))
-        })?;
-
-        if api_key.trim().is_empty() {
-            return Err(AirxError::Configuration(ConfigurationError::new(
-                "DeepSeek api_key 不能为空",
-            )));
-        }
-
-        let mut config = airx_protocol::deepseek::DeepSeekConfig::new(api_key);
-        if let Some(base_url) = self.base_url {
-            config = config.with_base_url(base_url)?;
-        }
-        if let Some(policy) = self.policy {
-            config = config.with_policy(policy);
-        }
-
-        self.client.build_with_deepseek(Some(config))
     }
 }

@@ -49,8 +49,6 @@ pub struct ProviderExtensions {
     pub openai: Option<Value>,
     /// Anthropic 原生字段。
     pub anthropic: Option<Value>,
-    /// DeepSeek 原生字段。
-    pub deepseek: Option<Value>,
 }
 
 /// 统一生成请求。
@@ -171,13 +169,6 @@ impl GenerateRequestBuilder {
     #[must_use]
     pub fn anthropic_extension(mut self, value: Value) -> Self {
         self.extensions.anthropic = Some(value);
-        self
-    }
-
-    /// 设置 DeepSeek 扩展。
-    #[must_use]
-    pub fn deepseek_extension(mut self, value: Value) -> Self {
-        self.extensions.deepseek = Some(value);
         self
     }
 

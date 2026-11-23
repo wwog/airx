@@ -37,28 +37,50 @@
 
 ## 4. base_url 约定
 
-| Provider | 默认值 | 端点拼接 |
+Provider 是「协议 × 部署配置」，不是协议本身。同一协议客户端通过 `base_url` 指向不同部署。
+
+| 协议形态 | 默认值 | 端点拼接 |
 | --- | --- | --- |
 | OpenAI | `https://api.openai.com/v1` | `{base}/chat/completions`、`{base}/responses` |
 | Anthropic | `https://api.anthropic.com` | `{base}/v1/messages` |
-| DeepSeek | `https://api.deepseek.com` | `{base}/chat/completions` |
+| DeepSeek (OpenAI-Compatible) | `https://api.deepseek.com` | `{base}/chat/completions` |
+| DeepSeek (Anthropic-Compatible) | `https://api.deepseek.com/anthropic` | `{base}/v1/messages` |
 
 `base_url` 必须为绝对地址；末尾 `/` 会被去掉。使用网关时按上表保留或省略 `/v1`。
 
-## 5. DeepSeek 兼容策略
+## 5. DeepSeek 兼容部署与 JSON mode
 
-- 默认 `Strict`，`BestEffort` 在 `Adapted.warnings` 中记录降级原因。
-- thinking 判定：显式 `extensions.thinking.type` 优先；否则看 `reasoning_effort`
-  （`none` 关闭，其它值开启）；两者都缺省时按文档**默认开启**。
+DeepSeek 没有独立协议模块，接入方式是“同一协议 + base_url”：
 
-| 情况 | Strict | BestEffort |
-| --- | --- | --- |
-| thinking + `temperature` | 报 `Compatibility` | 移除 temperature + Warning |
-| thinking + `tool_choice=required/指定工具` | 报 `Compatibility` | 降级为 `auto` + Warning |
-| `response_format=json_schema` | 报 `Compatibility` | 降级为 `json_object` + Warning |
+```rust
+// OpenAI-Compatible
+Client::builder()
+    .openai()
+    .api_key(key)
+    .base_url("https://api.deepseek.com")
+    .build()?;
 
-`top_p` 的行为随模型与模式变化（部分模式固定为 1.0/0.95），策略不做强制改写，
-请在接入具体模型时按官方文档核对。策略只存在于 `deepseek::compatibility`，不进入 OpenAI 类型。
+// Anthropic-Compatible
+Client::builder()
+    .anthropic()
+    .api_key(key)
+    .base_url("https://api.deepseek.com/anthropic")
+    .build()?;
+```
+
+JSON mode（官方指南）：
+
+- `response_format = {"type": "json_object"}`；不支持 `json_schema`。
+- 提示词必须包含 “json” 并给出输出示例。
+- 非 JSON 内容会被替换为空格，可能出现空 content 但 `finish_reason=stop`。
+- 设置足够的 `max_tokens`，空 content 时重试或兜底。
+- 完整示例：[deepseek_json.rs](../crates/airx/examples/deepseek_json.rs)。
+
+Unified 的 `ProviderId::deepseek` 只作为标签，实际走 OpenAI-Compatible Chat；
+Anthropic-Compatible 部署请使用 Native API（`client.anthropic()`）。`thinking` /
+`reasoning_effort` 通过 Chat 字段或 `extensions.thinking` 传入；DeepSeek 的
+`temperature` 在 thinking 模式下无效、`tool_choice=required` 在 thinking 模式下被拒绝，
+这些由调用方按提示与官方文档处理，airx 不再内置 provider 专属策略。
 
 ## 6. Unified 兼容模式
 

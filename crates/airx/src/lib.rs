@@ -8,8 +8,6 @@ mod anthropic;
 mod api;
 mod builder;
 mod client;
-#[cfg(feature = "deepseek")]
-mod deepseek;
 mod executor;
 #[cfg(feature = "openai")]
 mod openai;
@@ -29,13 +27,9 @@ pub use api::ApiClient;
 #[cfg(feature = "anthropic")]
 pub use builder::AnthropicBuilder;
 pub use builder::ClientBuilder;
-#[cfg(feature = "deepseek")]
-pub use builder::DeepSeekBuilder;
 #[cfg(feature = "openai")]
 pub use builder::OpenAiBuilder;
 pub use client::Client;
-#[cfg(feature = "deepseek")]
-pub use deepseek::{DeepSeek, DeepSeekChat};
 #[cfg(feature = "openai")]
 pub use openai::{Chat, OpenAi, Responses};
 #[cfg(feature = "stream")]

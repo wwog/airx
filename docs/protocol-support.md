@@ -6,7 +6,7 @@
 > **对齐基准：2026-11-23。**
 > 官方文档站点在部分区域不可达，参数以官方 SDK 的生成类型 / 请求签名为准：
 > Anthropic Python SDK `messages.create`、OpenAI Python SDK Chat/Responses 参数、
-> DeepSeek Chat Completions 文档。协议参数会随模型变化，接入新模型前请先核对
+> DeepSeek JSON mode 指南。协议参数会随模型变化，接入新模型前请先核对
 > [compatibility.md](compatibility.md) 与官方最新文档。
 
 ## OpenAI Chat Completions
@@ -64,22 +64,28 @@
 `output_config` / `thinking` 的 `display` 等新字段已建模；账号级参数
 （`inference_geo` / `service_tier` / `speed` / `workspace_id` 等）暂通过 `extensions` 透传。
 
-## DeepSeek Chat
+## 兼容部署：DeepSeek
 
-| 能力 | 状态 |
-| --- | --- |
-| 当前模型 | 文档为 `deepseek-flash` / `deepseek-v4-pro`（旧别名以官方为准） |
-| 结构与 OpenAI Chat 兼容的部分 | 复用 `openai::chat` 类型（明确限定，不是别名） |
-| 独立配置 / 认证 / 错误映射（ProviderId = deepseek） | 已实现 |
-| `thinking`：`{"type":"enabled"｜"disabled"}` | 通过 `extensions.thinking` 传入，策略会读取 |
-| `reasoning_effort`：none/low/high/max | 复用 Chat 类型字段 |
-| thinking 模式下 `temperature` 无效 | Strict 报错；BestEffort 移除并返回 Warning |
-| thinking 模式下 `tool_choice=required/指定工具` 被拒绝 | Strict 报错；BestEffort 降级为 `auto` |
-| `response_format` 仅支持 text / json_object | Strict 报错；BestEffort 降级为 json_object |
-| 流式 | 复用 Chat chunk 解析与 `ChatStreamAccumulator` |
+DeepSeek **不是独立协议**，而是 OpenAI / Anthropic 兼容部署。airx 不提供
+`airx-protocol/deepseek` 模块：同一个协议客户端 + `base_url` 即可接入。
 
-DeepSeek 的 `thinking` 与 `reasoning_effort` 都缺省时，thinking **默认开启**；
-策略按此判断，避免“看起来设置了温度、实际被忽略”。
+| 协议形态 | base_url | 说明 |
+| --- | --- | --- |
+| OpenAI Chat Completions | `https://api.deepseek.com` | `POST /chat/completions`；JSON mode 使用 `response_format={"type":"json_object"}` |
+| Anthropic Messages | `https://api.deepseek.com/anthropic` | `POST /v1/messages`；`x-api-key` + `anthropic-version` |
+
+DeepSeek JSON mode（依据官方指南）：
+
+- `response_format` 设为 `{"type": "json_object"}`；不支持 `json_schema`。
+- 系统或用户提示词**必须包含 “json”** 并给出期望输出示例。
+- 解析失败的非 JSON 内容会被替换为空格，可能出现 content 为空但 `finish_reason=stop`。
+- 用足够的 `max_tokens` 防止截断；空 content 应做重试/兜底。
+- 示例见 [deepseek_json.rs](../crates/airx/examples/deepseek_json.rs)。
+
+DeepSeek 的服务端工具（`deepseek_web_search` / `deepseek_read_url`）通过 OpenAI Chat 的
+`tools` 数组声明（`Tool::server(...)`）；`thinking` / `reasoning_effort` 通过 Chat 请求字段
+或 `extensions.thinking` 传入。Unified 中的 `ProviderId::deepseek` 仅作为标签，实际协议仍是
+OpenAI Chat；Anthropic-Compatible 部署请使用 Native API。
 
 ## 服务端联网工具（Provider 后台执行）
 
@@ -116,4 +122,4 @@ DeepSeek 的 `thinking` 与 `reasoning_effort` 都缺省时，thinking **默认�
 | --- | --- |
 | Anthropic | `anthropic-sdk-python`：`Messages.create` 签名与 `message_create_params.py`、`output_config_param.py`、`thinking_config_*` |
 | OpenAI | `openai-python`：Chat Completions 参数与 docstring（`max_tokens` 弃用说明、`reasoning_effort` 取值、`verbosity`） |
-| DeepSeek | DeepSeek API Docs：Chat Completions 请求参数、thinking / reasoning_effort、`response_format` 限制 |
+| DeepSeek | DeepSeek API Docs：JSON mode 指南、Chat Completions 与 Anthropic 兼容端点 |

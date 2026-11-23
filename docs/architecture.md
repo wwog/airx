@@ -74,7 +74,7 @@ airx 不是一个“统一的 LLM 请求库”，而是**多协议 AI API 基础
 | FR-P1 | OpenAI Responses | Request / Response / Input·Output **Item 生命周期** / 语义事件（`response.output_item.added`、`response.output_text.delta`、`response.function_call_arguments.delta` 等）/ 工具调用 / Structured Outputs / 多模态 / 状态 | P0 |
 | FR-P2 | OpenAI Chat Completions | Request / Response / `chunk`+`delta` 流模型 / `tool_calls` / usage / 多模态 | P0 |
 | FR-P3 | Anthropic Messages | Request / Response / Content Block 全类型 / Thinking 与 Redacted Thinking / Tool Use 与 Tool Result / Prompt Caching / Structured Outputs / `message_start`…`message_stop` 事件 | P1 |
-| FR-P4 | DeepSeek 兼容层 | 独立协议模块与兼容策略，**不得**等同于 OpenAI 别名；仅在语义已验证处复用底层结构 | P1 |
+| FR-P4 | DeepSeek 兼容部署 | 通过 OpenAI / Anthropic 兼容端点接入，不新增协议模块；JSON mode 差异由示例与文档说明 | P1 |
 | FR-P5 | 未知内容保留 | 未知字段、未知事件、未知 Content Block 均可原样保留并可重新序列化 | P0 |
 | FR-P6 | 协议可扩展 | 第三方能新增协议模块，无需修改 `airx-core` | P2 |
 
@@ -150,7 +150,7 @@ Responses 与 Chat Completions 必须是两个独立协议模块。二者事件�
 
 | 需求域 | 主责 crate | 主要模块 | 协作方 |
 | --- | --- | --- | --- |
-| FR-P1 / P2 / P3 / P4 | `airx-protocol` | `openai::responses`、`openai::chat`、`anthropic::messages`、`deepseek::chat` | core（类型/JSON/SSE 语法）、airx（编排） |
+| FR-P1 / P2 / P3 / P4 | `airx-protocol` | `openai::responses`、`openai::chat`、`anthropic::messages`；DeepSeek 复用兼容端点 | core（类型/JSON/SSE 语法）、airx（编排） |
 | FR-P5 / FR-J2 / FR-J3 / FR-J7 | `airx-core` | `json::*`、`extension` | protocol（字段声明） |
 | FR-P6 | `airx-protocol` | `extension`、`internal::codec` | core（数据契约） |
 | FR-S1 / FR-S6 | `airx-core` | `stream::sse`、`stream::decoder` | — |
@@ -312,11 +312,6 @@ airx/
 │   │       │   ├── config.rs
 │   │       │   ├── common/
 │   │       │   └── messages/      # request / response / content / tool / thinking / event / stream / accumulator
-│   │       ├── deepseek/
-│   │       │   ├── mod.rs
-│   │       │   ├── config.rs
-│   │       │   ├── chat/
-│   │       │   └── compatibility.rs
 │   │       └── google/            # 预留，首版不实现
 │   │
 │   ├── airx-transport/        # L2 副作用层
@@ -346,14 +341,12 @@ airx/
 │           └── adapter/
 │               ├── mod.rs
 │               ├── openai.rs
-│               ├── anthropic.rs
-│               └── deepseek.rs
+│               └── anthropic.rs
 │
 ├── tests/
 │   ├── fixtures/
 │   │   ├── openai/{responses,chat}/
-│   │   ├── anthropic/messages/
-│   │   └── deepseek/{chat,quirks}/
+│   │   └── anthropic/messages/
 │   ├── protocol.rs
 │   ├── serialization.rs
 │   └── streaming.rs
@@ -392,7 +385,7 @@ airx-transport
 
 必须成立：
 
-- `airx-core` 不依赖任何其他 workspace crate，也不知道 OpenAI / Anthropic / DeepSeek 的存在。
+- `airx-core` 不依赖任何其他 workspace crate，也不知道 OpenAI / Anthropic 的存在。
 - `airx-protocol` 只依赖 `airx-core`；不依赖传输实现的 crate、不依赖 Unified。
 - `airx-transport` 只依赖 `airx-core`；不知道什么是 Responses / Messages。
 - `airx-unified` 依赖 `airx-core` + `airx-protocol`。
@@ -457,9 +450,10 @@ CI 通过 `scripts/check-deps.sh`（基于 `cargo metadata`）校验依赖方向
 
 **组织原则**
 
-- 按 `provider/api` 二级模块划分，`openai::responses` / `openai::chat` / `anthropic::messages` / `deepseek::chat` 互不共享类型。
+- 按 `protocol/api` 二级模块划分，`openai::responses` / `openai::chat` / `anthropic::messages` 互不共享类型。
 - 共享仅限 `common/`（model、usage、error、tool 等**语义确实相同**的部分）与 `internal/`（纯辅助函数，不对外）。
-- DeepSeek 独立建模：可以复用 OpenAI Chat 的底层结构，但必须有独立的配置、兼容策略与模型行为，**不得** `pub use` 成 `openai::chat` 的别名。
+- Provider 是「协议 × 部署配置」：DeepSeek 这类兼容服务通过 OpenAI 或 Anthropic 端点接入，
+  只改 `base_url` / 认证 Header，不新增协议模块，也不在协议层写 provider 分支。
 
 **关于 `ApiProtocol` trait**
 
@@ -498,7 +492,7 @@ CI 通过 `scripts/check-deps.sh`（基于 `cargo metadata`）校验依赖方向
 **负责**
 
 - 统一 Message / Content / Tool / GenerateRequest / Response / Stream。
-- Provider namespace 扩展（`extensions.openai/anthropic/deepseek`）。
+- Provider namespace 扩展（`extensions.openai` / `extensions.anthropic`）。
 - Capability 判定与降级决策。
 - `adapter/*`：Native ⇄ Unified 的**纯函数**转换。
 - 兼容模式：`Strict` 报错 / `BestEffort` 降级 + Warning 列表。
@@ -515,7 +509,8 @@ CI 通过 `scripts/check-deps.sh`（基于 `cargo metadata`）校验依赖方向
 
 - `Client` / `Builder` / 配置合并 / `prelude`。
 - 把 protocol 的编码结果交给 transport 执行，再把响应交回 protocol 解码。
-- typed endpoint 入口：`client.openai().responses()`、`client.anthropic().messages()`、`client.deepseek().chat()`。
+- typed endpoint 入口：`client.openai().responses()`、`client.anthropic().messages()`；
+  兼容部署（如 DeepSeek）通过对应协议的 `base_url` 接入。
 - Unified 路径编排：Unified 请求 → adapter → native 请求 → transport → adapter → Unified 响应。
 - Feature 汇总与平台选择（native / wasm）。
 - 对外错误 re-export 与统一文档。
@@ -710,7 +705,7 @@ Raw Response ← Bytes ← Deserialize ← Normalize(可选) ←───┘
 
 **格式化模式**：`Compact`（请求）、`Pretty`（日志）、`Preserve`（保真）、`Canonical`（确定性，签名/缓存 Key 场景预留 RFC 8785 JCS）。
 
-**Provider 策略纯函数化**：优先 `fn prepare_deepseek_request(...)` 这类纯函数与静态配置；只有需要用户自定义或运行时注册时才用 trait object。
+**兼容差异纯函数化**：Provider 特有的 JSON/参数差异优先用纯函数或静态配置；只有需要用户自定义或运行时注册时才用 trait object。
 
 ### 7.2 Stream
 
@@ -809,7 +804,8 @@ while let Some(event) = stream.next().await {
 }
 ```
 
-`.openai()` / `.anthropic()` / `.deepseek()` 返回**静态类型**的 API Client，不做字符串查找 Provider。
+`.openai()` / `.anthropic()` 返回**静态类型**的 API Client，不做字符串查找 Provider；
+兼容部署通过 `base_url` 指定。
 
 ### 8.2 Unified API
 
@@ -836,7 +832,6 @@ Unified 的 Provider 选择可通过 Model ID、显式 Provider 或 Registry 完
 | `wasm` | 浏览器 Fetch |
 | `openai` | OpenAI Responses + Chat |
 | `anthropic` | Anthropic Messages |
-| `deepseek` | DeepSeek |
 | `all-providers` | 全部 Provider |
 | `unified` | 统一层 |
 | `stream` | 流式能力（core / transport / protocol 联动） |
@@ -871,7 +866,7 @@ Builder 不做业务决策、不做请求改写、不做隐式重试。
 | --- | --- |
 | Serialization | 请求序列化、响应反序列化、字段缺省与 `null`、未知字段保留、Raw JSON |
 | Streaming | SSE 分片边界、UTF-8 跨 buffer、多行 data、tool 参数 delta、异常中断、正常完成、`[DONE]` |
-| Protocol | Responses、Chat Completions、Messages、DeepSeek quirks |
+| Protocol | Responses、Chat Completions、Messages、兼容部署 JSON mode |
 | Compatibility | JSON Schema、tool_choice、thinking、多模态、Provider 专属字段 |
 | Conversion | Native → Unified（含 Strict 报错与 BestEffort Warning） |
 | Platform | Linux / macOS / Windows / `wasm32-unknown-unknown` |
@@ -882,8 +877,7 @@ Builder 不做业务决策、不做请求改写、不做隐式重试。
 ```text
 tests/fixtures/
 ├── openai/{responses,chat}/{request,response}.json + events/
-├── anthropic/messages/{request,response}.json + events/
-└── deepseek/{chat,quirks}/...
+└── anthropic/messages/{request,response}.json + events/
 ```
 
 协议模型每次变更都跑：反序列化 → 序列化 → 字段兼容性 → 流事件 → Native→Unified 转换 → WASM 编译。
@@ -914,8 +908,8 @@ tests/fixtures/
 | **M4 OpenAI Chat 完整 + 流式** | M3 | 非流式补全（tool、structured output、多模态）→ `chunk`/事件模型 → 接通 SSE → Accumulator | fixtures 全绿；`finish()` 四态断言；tool 参数增量 JSON 测试 |
 | **M5 OpenAI Responses** | M4 | `input`/`item` → `response`/`output` → 非流式 create → 语义事件 → Accumulator → 工具/结构化/多模态 | fixtures 全绿；事件类型逐条对齐官方事件名 |
 | **M6 Anthropic Messages** | M5 | config/common → content block/message → request/response → tool use/thinking → 事件 + Accumulator → caching/structured outputs | fixtures 全绿；**新增 Provider 未修改 core 与 transport**（架构验证点） |
-| **M7 DeepSeek** | M6 | config/认证 → 复用点确认（仅语义一致处）→ quirks 兼容策略 → 差异化参数 | quirks 快照测试通过；OpenAI 模块未被污染（无 provider 分支、无别名导出） |
-| **M8 Unified** | ≥3 个 native 协议完成 | 统一类型 → `capability` → `adapter::openai` → `adapter::anthropic` → `compatibility`（Strict/BestEffort + Warning）→ `adapter::deepseek` → Unified 编排 | 三向转换矩阵 + 不可表达能力的报错/告警断言；**新增统一层未修改 protocol** |
+| **M7 兼容部署（DeepSeek）** | M6 | OpenAI-Compatible / Anthropic-Compatible base_url → JSON mode 示例 → 文档 | 同一协议客户端可直接接入，无 provider 专属协议模块 |
+| **M8 Unified** | ≥2 个 native 协议完成 | 统一类型 → `capability` → `adapter::openai` → `adapter::anthropic` → `compatibility`（Strict/BestEffort + Warning）→ Unified 编排 | 双向转换矩阵 + 不可表达能力的报错/告警断言；**新增统一层未修改 protocol** |
 | **M9 生产化** | M8 | WASM Fetch → retry 策略细化 → middleware/tracing → Canonical JSON 与 Raw 透传 API → `deny`/clippy/MSRV/feature 矩阵 → 文档与示例 → API 冻结评审 | 跨平台 CI 全绿；公共 API 冻结候选 |
 
 为什么这个顺序：
@@ -924,7 +918,7 @@ tests/fixtures/
 - **M2 先做 `mock` 再做 `native`**：Mock 是 M3 之后全部测试的基础设施，晚做会被迫用真实网络写测试。
 - **M3 只做“薄竖切”**：在写几百个类型之前先验证组合契约；契约错误此时修复成本最低。
 - **先 Chat 后 Responses**：Chat 的非流式与 `chunk/delta` 模型更简单，用来把解码与流式基础设施跑通；Responses 的 item 生命周期与语义事件放在基础稳固之后。
-- **DeepSeek 早于 Unified**：它验证“新增 Provider 不改 core”，成本低；而 Unified 需要多个协议作为抽象样本，过早设计必然按 OpenAI 的语义偏斜。
+- **兼容部署早于 Unified**：DeepSeek 通过 base_url 验证“新增部署不改协议”，成本低；而 Unified 需要多个协议作为抽象样本。
 - **WASM、Canonical JSON、可观测放到 M9**：在此之前没有真实消费者，提前实现容易做成无人使用的抽象。
 
 ### 10.2 排序原则
@@ -1021,16 +1015,19 @@ M6（Anthropic Messages）：
 | 事件 | message_start / content_block_start·delta·stop / message_delta / message_stop / ping / error / `Unknown(Value)` |
 | 聚合 | `MessagesStreamAccumulator`：tool 参数增量拼接后解析，`message_stop` 前终止报 `Incomplete` |
 
-M7（DeepSeek）：
+M7（兼容部署：DeepSeek）：
 
-- 独立 `DeepSeekConfig` / `ChatEndpoint` / 错误映射（ProviderId = deepseek）。
-- 复用 OpenAI Chat 结构，但明确限定为“语义一致的部分”，不是别名。
-- `DeepSeekPolicy`：reasoner 的 temperature / top_p 在 Strict 下报错，BestEffort 下降级并产生警告。
+- 不再提供独立 DeepSeek 协议模块；DeepSeek 通过 OpenAI-Compatible（`https://api.deepseek.com`）
+  或 Anthropic-Compatible（`https://api.deepseek.com/anthropic`）端点接入，只改 `base_url`。
+- JSON mode：`response_format=json_object`，提示词必须包含 “json” 与示例；空 content/截断需兜底。
+- 新增 `deepseek_json` 示例，同时展示两种协议形态。
+- Unified 的 `ProviderId::deepseek` 仅作标签，实际走 OpenAI Chat；Anthropic-Compatible 用 Native API。
 
 M8（Unified）：
 
 - 统一 `Content` / `Message` / `GenerateRequest` / `GenerateResponse` / `TokenUsage`。
-- 纯函数 Adapter：OpenAI、Anthropic、DeepSeek；`Custom` 在 Anthropic 侧以 `Other(Value)` 保留。
+- 纯函数 Adapter：OpenAI、Anthropic；`Custom` 在 Anthropic 侧以 `Other(Value)` 保留。
+  DeepSeek 通过 OpenAI-Compatible 协议进入 Unified，`ProviderId::deepseek` 仅作为标签。
 - `capabilities(provider, model)`：已知模型给表，未知模型一律 `Unknown`。
 - `Client::generate`（Strict）/ `generate_best_effort`（降级 + `GenerateResponse.warnings`）。
 - Provider 选择：显式 `.provider(...)`，否则按模型名推断。
@@ -1045,7 +1042,7 @@ M9（生产化）：
 | 文档 | `protocol-support.md`、`compatibility.md`、README 快速开始与 Feature 表 |
 | 示例 | `chat`、`chat_stream`、`unified` |
 
-测试总计 **163** 个，`cargo test --workspace --features airx/anthropic,airx/deepseek,airx/unified` 全绿。
+测试总计 **180** 个，`cargo test --workspace --features airx/anthropic,airx/unified` 全绿。
 覆盖 SSE 任意字节切分、UTF-8 跨 chunk、CRLF/CR、BOM、截断流、增量 JSON、三个 Provider 的
 流式事件与聚合、错误映射、重试幂等分支、Header 优先级、Unified 的 Strict/BestEffort。
 
@@ -1061,8 +1058,8 @@ M9（生产化）：
 `temperature` / `top_p` / `top_k`，新增 `output_config`（`effort` / `format`）与四种
 `thinking` 形态；OpenAI `max_tokens` 弃用，新增 `max_completion_tokens` /
 `reasoning_effort` / `verbosity`，Responses 增加 `reasoning.effort` 与 `text.format`；
-DeepSeek 兼容策略覆盖 thinking 模式与 `response_format` 限制。细节与来源见
-`docs/protocol-support.md`。
+DeepSeek 通过 OpenAI / Anthropic 兼容端点接入，不设独立协议；JSON mode 差异记录在
+`docs/protocol-support.md` 与 `docs/compatibility.md`。
 
 服务端联网工具（`web_search` / `web_fetch` / `deepseek_web_search`）按 Provider 建模：
 工具声明与结果（`web_search_call`、`server_tool_use`、`web_search_tool_result`、

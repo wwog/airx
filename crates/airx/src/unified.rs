@@ -39,9 +39,15 @@ impl Client {
         let _ = mode;
         let provider = resolve_provider(&request);
 
-        if provider == ProviderId::openai() {
+        // DeepSeek 不是独立协议：Unified 走 OpenAI-Compatible Chat，
+        // 通过 base_url 指向对应部署。Anthropic-Compatible 部署请用 Native API。
+        if provider == ProviderId::openai() || provider == ProviderId::deepseek() {
             #[cfg(feature = "openai")]
-            return self.generate_openai(&request, mode).await;
+            {
+                let mut response = self.generate_openai(&request, mode).await?;
+                response.provider = provider;
+                return Ok(response);
+            }
             #[cfg(not(feature = "openai"))]
             return Err(feature_disabled("openai"));
         }
@@ -51,13 +57,6 @@ impl Client {
             return self.generate_anthropic(&request, mode).await;
             #[cfg(not(feature = "anthropic"))]
             return Err(feature_disabled("anthropic"));
-        }
-
-        if provider == ProviderId::deepseek() {
-            #[cfg(feature = "deepseek")]
-            return self.generate_deepseek(&request, mode).await;
-            #[cfg(not(feature = "deepseek"))]
-            return Err(feature_disabled("deepseek"));
         }
 
         Err(AirxError::Configuration(ConfigurationError::new(format!(
@@ -107,25 +106,6 @@ impl Client {
         unified.warnings = adapted.warnings;
         Ok(unified)
     }
-
-    #[cfg(feature = "deepseek")]
-    async fn generate_deepseek(
-        &self,
-        request: &GenerateRequest,
-        mode: CompatibilityMode,
-    ) -> Result<GenerateResponse, AirxError> {
-        use airx_protocol::deepseek::chat::ChatEndpoint;
-
-        let config = self.deepseek.as_ref().ok_or_else(|| missing("DeepSeek"))?;
-        let adapted = airx_unified::adapter::deepseek::to_deepseek(request, mode)?;
-        let api =
-            crate::api::ApiClient::new(ChatEndpoint::new(config.clone()), self.executor.clone());
-        let response = api.create(&adapted.native).await?;
-
-        let mut unified = airx_unified::adapter::deepseek::from_deepseek(response);
-        unified.warnings = adapted.warnings;
-        Ok(unified)
-    }
 }
 
 fn resolve_provider(request: &GenerateRequest) -> ProviderId {
@@ -136,14 +116,13 @@ fn resolve_provider(request: &GenerateRequest) -> ProviderId {
     let model = request.model.as_str().to_ascii_lowercase();
     if model.contains("claude") {
         ProviderId::anthropic()
-    } else if model.contains("deepseek") {
-        ProviderId::deepseek()
     } else {
+        // DeepSeek / OpenAI-Compatible 部署都使用 OpenAI Chat 协议。
         ProviderId::openai()
     }
 }
 
-#[cfg(any(feature = "openai", feature = "anthropic", feature = "deepseek"))]
+#[cfg(any(feature = "openai", feature = "anthropic"))]
 fn missing(provider: &str) -> AirxError {
     AirxError::Configuration(ConfigurationError::new(format!(
         "该 Client 未配置 {provider} Provider"

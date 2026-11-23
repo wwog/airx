@@ -147,3 +147,38 @@ fn capabilities_are_exposed_on_the_client() {
     let caps = client.capabilities(&ProviderId::openai(), &ModelId::new("gpt-4o-mini"));
     assert!(caps.tools.is_supported());
 }
+
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn deepseek_provider_routes_through_openai_compatible_chat() {
+    let mock = MockTransport::new();
+    mock.push_json(200, chat_response());
+
+    let client = Client::builder()
+        .transport(mock.clone())
+        .openai()
+        .api_key("sk-test")
+        .base_url("https://api.deepseek.com")
+        .build()
+        .expect("client");
+
+    let response = client
+        .generate(
+            GenerateRequest::builder()
+                .model("deepseek-flash")
+                .provider(ProviderId::deepseek())
+                .user("hi")
+                .build()
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    // ProviderId 只是标签，实际协议仍是 OpenAI Chat。
+    assert_eq!(response.provider, ProviderId::deepseek());
+    assert_eq!(mock.requests()[0].uri.path(), "/chat/completions");
+    assert_eq!(
+        mock.requests()[0].headers["authorization"],
+        "Bearer sk-test"
+    );
+}

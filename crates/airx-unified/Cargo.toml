@@ -13,8 +13,6 @@ workspace = true
 default = []
 openai = ["airx-protocol/openai"]
 anthropic = ["airx-protocol/anthropic"]
-# DeepSeek 复用 OpenAI adapter。
-deepseek = ["openai", "airx-protocol/deepseek"]
 
 [dependencies]
 airx-core = { path = "../airx-core", default-features = false }

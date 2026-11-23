@@ -389,3 +389,25 @@ mod modern_params_tests {
         assert!(value.get("max_tokens").is_none());
     }
 }
+
+#[cfg(test)]
+mod json_mode_tests {
+    use super::*;
+    use crate::openai::chat::tool::ResponseFormat;
+
+    #[test]
+    fn json_object_mode_serializes_for_deepseek_compatible_deployments() {
+        let request = ChatCompletionRequest::builder()
+            .model("deepseek-flash")
+            .system("你只输出 json，示例：{\"question\":\"q\",\"answer\":\"a\"}")
+            .user("以 json 返回")
+            .response_format(ResponseFormat::JsonObject)
+            .max_tokens(512)
+            .build()
+            .expect("request");
+
+        let value = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(value["response_format"]["type"], "json_object");
+        assert_eq!(value["max_tokens"], 512);
+    }
+}

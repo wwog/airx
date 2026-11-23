@@ -5,7 +5,7 @@ on:
   pull_request:
 
 env:
-  ALL_FEATURES: airx/anthropic,airx/deepseek,airx/unified
+  ALL_FEATURES: airx/anthropic,airx/unified
 
 jobs:
   ci:

@@ -2,7 +2,5 @@
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
-#[cfg(feature = "deepseek")]
-pub mod deepseek;
 #[cfg(feature = "openai")]
 pub mod openai;

@@ -2,7 +2,7 @@
 
 多协议 AI API 基础设施库（Rust）。One Rust SDK. Multiple AI protocols. No feature loss.
 
-- **Native API**：OpenAI Chat Completions / Responses、Anthropic Messages、DeepSeek Chat，
+- **Native API**：OpenAI Chat Completions / Responses、Anthropic Messages，
   完整保留各协议自己的请求、响应、事件与错误形状。
 - **Unified API**：可选统一层，纯函数 Adapter + 能力判定 + Strict/BestEffort 兼容模式。
 - **可替换传输**：Reqwest（native）、Fetch（wasm）、Mock，协议层零 HTTP 依赖。
@@ -13,7 +13,7 @@
 | Crate | 职责 |
 | --- | --- |
 | `airx-core` | 错误、模型与能力标识、JSON 保真、SSE、增量 JSON、HTTP 数据结构 |
-| `airx-protocol` | OpenAI / Anthropic / DeepSeek 强类型模型与纯编解码 |
+| `airx-protocol` | OpenAI / Anthropic 强类型模型与纯编解码（DeepSeek 走兼容端点） |
 | `airx-transport` | HTTP、流式读取、超时取消、幂等感知重试、同步中间件、Mock |
 | `airx-unified` | 统一内容/请求/响应、Adapter、Capability、兼容模式 |
 | `airx` | Client / Builder / typed endpoint / prelude / Unified 编排 |
@@ -86,7 +86,6 @@ let response = client
 | `wasm` | 浏览器 Fetch 传输（含 ReadableStream 流式） |
 | `openai` | OpenAI Chat + Responses |
 | `anthropic` | Anthropic Messages |
-| `deepseek` | DeepSeek Chat（隐含 `openai` 底层结构） |
 | `stream` | 流式 API（`ProtocolStream`、事件、Accumulator） |
 | `unified` | 统一层与 `Client::generate` |
 | `all-providers` | 全部 Provider |
@@ -114,6 +113,12 @@ cargo run -p airx --features unified --example opencode_full
                                               # 结构化输出 + 工具调用 + Unified
 ```
 
+DeepSeek（OpenAI / Anthropic 兼容部署，JSON mode）：
+
+```bash
+DEEPSEEK_API_KEY=sk-... cargo run -p airx --example deepseek_json
+```
+
 生成物写到 `target/opencode-*.svg` 与 `target/opencode-*.txt`。
 
 环境变量：
@@ -133,7 +138,8 @@ cargo run -p airx --features unified --example opencode_full
 - 流式请求不重试（已消费事件无法重放）；首次事件前重试留待后续。
 - WASM 传输已通过 `wasm32-unknown-unknown` 编译检查，浏览器运行时行为尚未纳入 CI。
 - Provider 参数随模型演进：Anthropic 已移除 `temperature` / `top_p` / `top_k`，
-  OpenAI `max_tokens` 已弃用，DeepSeek 不支持 `json_schema`。对齐基准与来源见
+  OpenAI `max_tokens` 已弃用。DeepSeek 是 OpenAI / Anthropic 兼容部署，不设独立协议，
+  结构化输出走 JSON mode（`response_format=json_object`）。对齐基准与来源见
   [docs/protocol-support.md](docs/protocol-support.md) 与 [docs/compatibility.md](docs/compatibility.md)。
 - 服务端联网工具（OpenAI `web_search`、Anthropic `web_search` / `web_fetch`、DeepSeek
   `deepseek_web_search`）由 Provider 后台执行；airx 只声明工具并解析引用/调用记录，
@@ -143,8 +149,8 @@ cargo run -p airx --features unified --example opencode_full
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --features airx/anthropic,airx/deepseek,airx/unified -- -D warnings
-cargo test --workspace --features airx/anthropic,airx/deepseek,airx/unified
+cargo clippy --workspace --all-targets --features airx/anthropic,airx/unified -- -D warnings
+cargo test --workspace --features airx/anthropic,airx/unified
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ./scripts/check-deps.sh
 cargo check -p airx --target wasm32-unknown-unknown \
