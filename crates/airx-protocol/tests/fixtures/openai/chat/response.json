@@ -1,0 +1,27 @@
+{
+  "id": "chatcmpl-123",
+  "object": "chat.completion",
+  "created": 1729000000,
+  "model": "gpt-4o-mini-2024-07-18",
+  "system_fingerprint": "fp_123",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "你好!",
+        "refusal": null,
+        "annotations": []
+      },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 20,
+    "completion_tokens": 3,
+    "total_tokens": 23,
+    "prompt_tokens_details": { "cached_tokens": 0 }
+  },
+  "service_tier": "default"
+}

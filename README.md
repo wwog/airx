@@ -2,31 +2,145 @@
 
 多协议 AI API 基础设施库（Rust）。One Rust SDK. Multiple AI protocols. No feature loss.
 
+- **Native API**：OpenAI Chat Completions / Responses、Anthropic Messages、DeepSeek Chat，
+  完整保留各协议自己的请求、响应、事件与错误形状。
+- **Unified API**：可选统一层，纯函数 Adapter + 能力判定 + Strict/BestEffort 兼容模式。
+- **可替换传输**：Reqwest（native）、Fetch（wasm）、Mock，协议层零 HTTP 依赖。
+- **流式**：SSE 解析一次，事件各自建模，独立 Accumulator，截断流不会被当作成功。
+
 ## 结构
 
 | Crate | 职责 |
 | --- | --- |
-| `airx-core` | 基础层：错误分类、模型与能力标识、JSON 保真、SSE 语法、HTTP 数据结构 |
-| `airx-protocol` | 原生协议：OpenAI / Anthropic / DeepSeek 的强类型模型与纯编解码 |
-| `airx-transport` | 传输层：HTTP 执行、流式读取、超时取消、重试、中间件 |
-| `airx-unified` | 统一层（可选）：跨 Provider 的统一模型与 Adapter |
-| `airx` | 门面：Client / Builder / typed endpoint / prelude |
+| `airx-core` | 错误、模型与能力标识、JSON 保真、SSE、增量 JSON、HTTP 数据结构 |
+| `airx-protocol` | OpenAI / Anthropic / DeepSeek 强类型模型与纯编解码 |
+| `airx-transport` | HTTP、流式读取、超时取消、幂等感知重试、同步中间件、Mock |
+| `airx-unified` | 统一内容/请求/响应、Adapter、Capability、兼容模式 |
+| `airx` | Client / Builder / typed endpoint / prelude / Unified 编排 |
 
-依赖单向：`airx → {core, protocol, transport, unified}`，`protocol/transport → core`，`unified → {core, protocol}`。
-完整设计与实现顺序见 [docs/architecture.md](docs/architecture.md)。
+依赖严格单向：`airx → {core, protocol, transport, unified}`，`protocol/transport → core`，`unified → protocol`。
+完整设计与决策见 [docs/architecture.md](docs/architecture.md)，协议覆盖见
+[docs/protocol-support.md](docs/protocol-support.md)，兼容规则见 [docs/compatibility.md](docs/compatibility.md)。
+
+## 快速开始
+
+```toml
+[dependencies]
+airx = "0.1"
+```
+
+```rust,ignore
+use airx::prelude::*;
+
+let client = Client::builder().openai().api_key("sk-...").build()?;
+
+// Native API（Chat）
+let response = client
+    .openai()?
+    .chat()
+    .create(
+        ChatCompletionRequest::builder()
+            .model("gpt-4o-mini")
+            .system("be concise")
+            .user("Hello")
+            .build()?,
+    )
+    .await?;
+
+// 流式（累积为完整响应）
+let mut stream = client
+    .openai()?
+    .chat()
+    .stream(
+        ChatCompletionRequest::builder().model("gpt-4o-mini").user("Hello").build()?,
+    )
+    .await?;
+let mut accumulator = ChatStreamAccumulator::new();
+while let Some(event) = stream.next().await? {
+    accumulator.apply(event)?;
+}
+let streamed = accumulator.finish()?;
+# Ok::<(), AirxError>(())
+```
+
+```rust,ignore
+// Unified API（可选 feature）
+let client = Client::builder().openai().api_key("sk-...").build()?;
+let response = client
+    .generate(
+        GenerateRequest::builder()
+            .model("gpt-4o-mini")   // 也可显式 .provider(ProviderId::openai())
+            .user("Hello")
+            .build()?,
+    )
+    .await?;
+# Ok::<(), AirxError>(())
+```
+
+## Feature
+
+| Feature | 内容 |
+| --- | --- |
+| `native` | Reqwest 传输 |
+| `rustls-tls` / `native-tls` | TLS 后端（默认 rustls） |
+| `wasm` | 浏览器 Fetch 传输（含 ReadableStream 流式） |
+| `openai` | OpenAI Chat + Responses |
+| `anthropic` | Anthropic Messages |
+| `deepseek` | DeepSeek Chat（隐含 `openai` 底层结构） |
+| `stream` | 流式 API（`ProtocolStream`、事件、Accumulator） |
+| `unified` | 统一层与 `Client::generate` |
+| `all-providers` | 全部 Provider |
+
+默认：`native + rustls-tls + openai + stream`。
+
+## 示例
+
+官方 OpenAI 示例：
+
+```bash
+OPENAI_API_KEY=sk-... cargo run -p airx --example chat
+OPENAI_API_KEY=sk-... cargo run -p airx --example chat_stream
+OPENAI_API_KEY=sk-... cargo run -p airx --example unified
+```
+
+OpenAI-Compatible 网关示例（OpenCode Zen，两个模型 `hy4-flash-free` / `deepseek-v4.1-flash`）：
+
+```bash
+cp .env.example .env      # 填入 OPENCODE_API_KEY；.env 已被 git 忽略
+cargo run -p airx --example opencode_text     # 非流式：输出文字海报 SVG
+cargo run -p airx --example opencode_stream   # 流式：SSE → 事件 → 聚合器
+cargo run -p airx --example opencode_retry    # 重试：注入 429 + Retry-After
+cargo run -p airx --features unified --example opencode_full
+                                              # 结构化输出 + 工具调用 + Unified
+```
+
+生成物写到 `target/opencode-*.svg` 与 `target/opencode-*.txt`。
+
+环境变量：
+
+| 变量 | 说明 |
+| --- | --- |
+| `OPENCODE_BASE_URL` | 默认 `https://opencode.ai/zen/go/v1` |
+| `OPENCODE_API_KEY` | 必填 |
+| `OPENCODE_MODELS` | 逗号分隔，默认 `hy4-flash-free,deepseek-v4.1-flash` |
+
+网关要求 `x-opencode-session` Header，示例通过执行级 `default_headers` 注入。
+
+## 已知边界
+
+- `JsonMode::Canonical`（RFC 8785 JCS）尚未实现，会返回明确错误，而不是给出不可靠的规范化结果。
+- 中间件是同步的；需要异步（如 Token 刷新）时请实现自定义 `Transport`。
+- 流式请求不重试（已消费事件无法重放）；首次事件前重试留待后续。
+- WASM 传输已通过 `wasm32-unknown-unknown` 编译检查，浏览器运行时行为尚未纳入 CI。
 
 ## 开发
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --features airx/anthropic,airx/deepseek,airx/unified -- -D warnings
+cargo test --workspace --features airx/anthropic,airx/deepseek,airx/unified
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ./scripts/check-deps.sh
 cargo check -p airx --target wasm32-unknown-unknown \
-  --no-default-features --features wasm,openai,stream
+  --no-default-features --features wasm,openai,stream,unified
 ```
-
-## 状态
-
-M0（Workspace 接线）与 M1（`airx-core` 契约层）已完成，60 个测试通过。
-下一步 M2：`airx-transport` 的 `Transport` trait、Mock、native、流式读取与重试。

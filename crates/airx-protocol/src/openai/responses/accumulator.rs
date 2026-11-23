@@ -1,0 +1,352 @@
+//! Responses 流式聚合器。
+
+use std::collections::BTreeMap;
+
+use airx_core::AirxError;
+use airx_core::error::StreamError;
+use airx_core::json::Extensions;
+use airx_core::stream::StreamStatus;
+
+use super::event::ResponsesEvent;
+use super::response::{
+    FunctionCallItem, MessageItem, OutputContent, OutputItem, OutputText, ResponsesResponse,
+};
+
+#[derive(Debug)]
+enum ItemState {
+    Message {
+        id: Option<String>,
+        role: String,
+        text: String,
+    },
+    FunctionCall {
+        id: Option<String>,
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    Other(serde_json::Value),
+}
+
+impl ItemState {
+    fn from_item(item: OutputItem) -> Self {
+        match item {
+            OutputItem::Message(message) => Self::Message {
+                id: message.id,
+                role: message.role,
+                text: message
+                    .content
+                    .iter()
+                    .filter_map(|content| match content {
+                        OutputContent::OutputText(text) => Some(text.text.as_str()),
+                        _ => None,
+                    })
+                    .collect(),
+            },
+            OutputItem::FunctionCall(call) => Self::FunctionCall {
+                id: call.id,
+                call_id: call.call_id,
+                name: call.name,
+                arguments: call.arguments,
+            },
+            OutputItem::Other(value) => Self::Other(value),
+        }
+    }
+
+    fn into_item(self) -> OutputItem {
+        match self {
+            Self::Message { id, role, text } => OutputItem::Message(MessageItem {
+                id,
+                role,
+                content: vec![OutputContent::OutputText(OutputText {
+                    text,
+                    annotations: Vec::new(),
+                    extensions: Extensions::new(),
+                })],
+                status: None,
+                extensions: Extensions::new(),
+            }),
+            Self::FunctionCall {
+                id,
+                call_id,
+                name,
+                arguments,
+            } => OutputItem::FunctionCall(FunctionCallItem {
+                id,
+                call_id,
+                name,
+                arguments,
+                status: None,
+                extensions: Extensions::new(),
+            }),
+            Self::Other(value) => OutputItem::Other(value),
+        }
+    }
+}
+
+/// Responses 流式聚合器。
+#[derive(Debug, Default)]
+pub struct ResponsesStreamAccumulator {
+    response: Option<ResponsesResponse>,
+    items: BTreeMap<u32, ItemState>,
+    status: StreamStatus,
+    failure: Option<String>,
+}
+
+impl ResponsesStreamAccumulator {
+    /// 创建空聚合器。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 当前状态。
+    pub fn status(&self) -> StreamStatus {
+        self.status
+    }
+
+    /// 应用一个事件。
+    pub fn apply(&mut self, event: ResponsesEvent) -> Result<(), AirxError> {
+        if self.status.is_terminal() {
+            return Ok(());
+        }
+
+        match event {
+            ResponsesEvent::Created(event) => {
+                self.response = Some(event.response);
+            }
+            ResponsesEvent::OutputItemAdded(event) => {
+                self.items
+                    .insert(event.output_index, ItemState::from_item(event.item));
+            }
+            ResponsesEvent::OutputItemDone(event) => {
+                self.items
+                    .insert(event.output_index, ItemState::from_item(event.item));
+            }
+            ResponsesEvent::OutputTextDelta(event) => {
+                let state =
+                    self.items
+                        .entry(event.output_index)
+                        .or_insert_with(|| ItemState::Message {
+                            id: Some(event.item_id.clone()),
+                            role: "assistant".to_owned(),
+                            text: String::new(),
+                        });
+                if let ItemState::Message { text, .. } = state {
+                    text.push_str(&event.delta);
+                }
+            }
+            ResponsesEvent::OutputTextDone(event) => {
+                if let Some(ItemState::Message { text, .. }) =
+                    self.items.get_mut(&event.output_index)
+                {
+                    *text = event.text;
+                }
+            }
+            ResponsesEvent::FunctionCallArgumentsDelta(event) => {
+                let state = self.items.entry(event.output_index).or_insert_with(|| {
+                    ItemState::FunctionCall {
+                        id: Some(event.item_id.clone()),
+                        call_id: String::new(),
+                        name: String::new(),
+                        arguments: String::new(),
+                    }
+                });
+                if let ItemState::FunctionCall { arguments, .. } = state {
+                    arguments.push_str(&event.delta);
+                }
+            }
+            ResponsesEvent::FunctionCallArgumentsDone(event) => {
+                if let Some(ItemState::FunctionCall { arguments, .. }) =
+                    self.items.get_mut(&event.output_index)
+                {
+                    *arguments = event.arguments;
+                }
+            }
+            ResponsesEvent::Completed(event) => {
+                self.response = Some(event.response);
+                self.status = StreamStatus::Completed;
+            }
+            ResponsesEvent::Failed(event) => {
+                self.failure = event
+                    .response
+                    .error
+                    .as_ref()
+                    .and_then(|error| error.get("message"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                self.response = Some(event.response);
+                self.status = StreamStatus::Failed;
+            }
+            ResponsesEvent::Incomplete(event) => {
+                self.response = Some(event.response);
+                self.status = StreamStatus::Incomplete;
+            }
+            ResponsesEvent::Error(event) => {
+                self.failure = Some(event.message);
+                self.status = StreamStatus::Failed;
+            }
+            ResponsesEvent::Unknown(_) => {}
+        }
+
+        Ok(())
+    }
+
+    /// 当前部分结果。
+    pub fn snapshot(&self) -> ResponsesResponse {
+        self.build(Some("in_progress"))
+    }
+
+    /// 结束并返回完整响应。
+    pub fn finish(self) -> Result<ResponsesResponse, AirxError> {
+        match self.status {
+            StreamStatus::Completed => Ok(self.build(None)),
+            StreamStatus::Failed => Err(AirxError::Stream(StreamError::failed(
+                self.failure.unwrap_or_else(|| "响应流失败".to_owned()),
+            ))),
+            StreamStatus::Incomplete => {
+                Err(AirxError::Stream(StreamError::incomplete("响应流被截断")))
+            }
+            _ => Err(AirxError::Stream(StreamError::incomplete(
+                "未收到 response.completed 事件",
+            ))),
+        }
+    }
+
+    fn build(&self, status: Option<&str>) -> ResponsesResponse {
+        let mut response = self.response.clone().unwrap_or_else(|| ResponsesResponse {
+            id: String::new(),
+            object: None,
+            created_at: None,
+            status: None,
+            model: None,
+            output: Vec::new(),
+            usage: None,
+            incomplete_details: None,
+            error: None,
+            extensions: Extensions::new(),
+        });
+
+        if response.output.is_empty() {
+            response.output = self
+                .items
+                .values()
+                .map(|state| match state {
+                    ItemState::Message { id, role, text } => ItemState::Message {
+                        id: id.clone(),
+                        role: role.clone(),
+                        text: text.clone(),
+                    }
+                    .into_item(),
+                    ItemState::FunctionCall {
+                        id,
+                        call_id,
+                        name,
+                        arguments,
+                    } => ItemState::FunctionCall {
+                        id: id.clone(),
+                        call_id: call_id.clone(),
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                    }
+                    .into_item(),
+                    ItemState::Other(value) => OutputItem::Other(value.clone()),
+                })
+                .collect();
+        }
+
+        if response.status.is_none() {
+            response.status = status.map(str::to_owned);
+        }
+        response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use airx_core::error::StreamErrorKind;
+    use serde_json::json;
+
+    fn event(value: serde_json::Value) -> ResponsesEvent {
+        serde_json::from_value(value).expect("event")
+    }
+
+    #[test]
+    fn accumulates_text_and_function_call() {
+        let mut acc = ResponsesStreamAccumulator::new();
+        acc.apply(event(json!({
+            "type": "response.created",
+            "response": {"id": "resp_1", "status": "in_progress", "output": []}
+        })))
+        .expect("created");
+        acc.apply(event(json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "message", "role": "assistant", "content": []}
+        })))
+        .expect("item");
+        acc.apply(event(json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "你"
+        })))
+        .expect("delta 1");
+        acc.apply(event(json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "好"
+        })))
+        .expect("delta 2");
+        acc.apply(event(json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1", "output_index": 1, "delta": "{\"q\":1}"
+        })))
+        .expect("args");
+        acc.apply(event(json!({
+            "type": "response.completed",
+            "response": {"id": "resp_1", "status": "completed", "output": []}
+        })))
+        .expect("completed");
+
+        // 服务端最终响应为空 output 时，使用累积的 item。
+        let response = acc.finish().expect("finish");
+        assert_eq!(response.output_text(), "你好");
+        match &response.output[1] {
+            OutputItem::FunctionCall(call) => {
+                assert_eq!(call.arguments, "{\"q\":1}");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_completion_is_incomplete() {
+        let mut acc = ResponsesStreamAccumulator::new();
+        acc.apply(event(json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg", "output_index": 0, "delta": "x"
+        })))
+        .expect("delta");
+
+        match acc.finish().expect_err("incomplete") {
+            AirxError::Stream(error) => assert_eq!(error.kind, StreamErrorKind::Incomplete),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_event_carries_reason() {
+        let mut acc = ResponsesStreamAccumulator::new();
+        acc.apply(event(json!({
+            "type": "response.failed",
+            "response": {"id": "r", "output": [], "error": {"message": "boom"}}
+        })))
+        .expect("failed");
+
+        match acc.finish().expect_err("failed") {
+            AirxError::Stream(error) => {
+                assert_eq!(error.kind, StreamErrorKind::Failed);
+                assert!(error.message.contains("boom"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+}

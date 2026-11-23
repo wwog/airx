@@ -322,16 +322,14 @@ airx/
 │   ├── airx-transport/        # L2 副作用层
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── transport.rs   # Transport trait
-│   │       ├── client.rs      # 执行器：编排 middleware / retry / timeout
-│   │       ├── native.rs
-│   │       ├── wasm.rs
-│   │       ├── body.rs
-│   │       ├── response.rs    # ResponseMetadata
-│   │       ├── stream.rs
-│   │       ├── retry.rs
-│   │       ├── middleware.rs
-│   │       └── error.rs
+│   │       ├── transport.rs   # Transport trait / BoxFuture（对象安全）
+│   │       ├── native.rs      # Reqwest 实现 + 错误映射
+│   │       ├── mock.rs        # 可脚本化 Mock（响应队列 + 请求记录）
+│   │       ├── wasm.rs        # Fetch 实现（含 ReadableStream）
+│   │       ├── response.rs    # HttpStreamResponse / ResponseMetadata
+│   │       ├── stream.rs      # ByteStream
+│   │       ├── retry.rs       # RetryPolicy + RetryTransport
+│   │       └── middleware.rs  # 同步中间件链
 │   │
 │   └── airx-unified/          # L3 统一层（可选）
 │       └── src/
@@ -366,8 +364,8 @@ airx/
 ├── .github/workflows/ci.yml   # fmt / clippy / test / 依赖方向 / wasm
 └── docs/
     ├── architecture.md        # 本文
-    ├── protocol-support.md*
-    └── compatibility.md*
+    ├── protocol-support.md
+    └── compatibility.md
 ```
 
 ### 4.2 依赖 DAG
@@ -561,52 +559,53 @@ Client    组合二者，管理生命周期与策略    位于 airx
 ### 6.2 Protocol 契约
 
 ```rust
-// 表达架构意图的形态；实际按 API 提供具体类型与函数
-pub trait ApiProtocol {
+pub trait Endpoint {
     type Request;
     type Response;
-    type Event;
 
     fn encode(&self, request: &Self::Request) -> Result<HttpRequest, AirxError>;
-    fn decode(&self, status: u16, headers: &HeaderMap, body: Bytes) -> Result<Self::Response, AirxError>;
-    fn decode_event(&self, event: RawEvent) -> Result<Self::Event, AirxError>;
+    fn decode(&self, response: HttpResponse) -> Result<Self::Response, AirxError>;
 }
 ```
 
-`encode` 产出的 `HttpRequest` 定义在 `airx-core::http`，因此 protocol 无需依赖 transport。`decode_event` 只处理单个已切分的原始事件，不做网络读取。
+`encode` 产出的 `HttpRequest` 定义在 `airx-core::http`，因此 protocol 无需依赖 transport。
+流式事件解码在 M4 以独立的 `StreamingEndpoint` trait 补充，而不是现在增加未使用的关联类型。
 
 ### 6.3 Transport 契约
 
 ```rust
-pub trait Transport {
-    type Error;
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-    async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, Self::Error>;
-    async fn execute_stream(&self, request: HttpRequest) -> Result<HttpStreamResponse, Self::Error>;
+pub trait Transport: Send + Sync {
+    fn execute(&self, request: HttpRequest) -> BoxFuture<'_, Result<HttpResponse, TransportError>>;
+    fn execute_stream(&self, request: HttpRequest) -> BoxFuture<'_, Result<HttpStreamResponse, TransportError>>;
 }
 ```
 
-- 核心 trait 不强制 `Send + Sync`，避免 WASM 上的 Future 约束冲突。
-- Native 实现额外声明 `Send + Sync`；需要动态分发时，另提供对象安全的 `BoxFuture` 适配层。
+- **对象安全**：`Client` 需要在运行时持有可替换的传输实现，因此方法返回 `BoxFuture`。
+  只有传输边界付出一次装箱，协议与解析仍是纯函数。
+- **不强制 `Send`**：Native 下要求 `Send + Sync`；WASM 下按目标平台去掉该约束
+  （`BoxFuture` 与 trait 均有 `cfg` 版本）。
+- **固定错误形状**：实现只把后端错误映射为 `TransportError`，不引入第二套错误体系。
+- 实现 `&T` 与 `Arc<T>` 的转发，Mock 与自定义 Transport 都可直接交给 Builder。
 - 必须提供 Mock 实现，供单元测试与 golden 测试使用。
 
-### 6.4 组合：泛型静态分发优先
+### 6.4 组合
 
 ```rust
-pub struct ApiClient<P, T> {
-    protocol: P,
-    transport: T,
-    config: ExecutionConfig,
+pub struct ApiClient<P> {
+    endpoint: P,
+    executor: Arc<Executor>,   // 持有 Arc<dyn Transport> 与执行级 Header
 }
 
-impl<P: ApiProtocol, T: Transport> ApiClient<P, T> {
+impl<P: Endpoint> ApiClient<P> {
     pub async fn create(&self, request: &P::Request) -> Result<P::Response, AirxError>;
-    pub async fn stream(&self, request: &P::Request) -> Result<EventStream<P::Event>, AirxError>;
+    pub async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, AirxError>; // 逃生通道
 }
 ```
 
-- 默认静态泛型，避免每层装箱。
-- 仅在运行时选择 Provider（如 Unified 路径）时使用 trait object 适配层。
+- 协议端点是**静态泛型**：类型信息不丢失，每个 API 保持自己的 Request / Response。
+- 传输实现通过 `Arc<dyn Transport>` **动态替换**：Builder 可在 Reqwest / Mock / 自定义实现间切换，无需改协议代码。
 - `ApiClient` 位于 `airx`（组合根），保证 protocol 与 transport 不互相依赖。
 
 ### 6.5 执行流水线
@@ -787,12 +786,12 @@ let client = Client::builder()
     .build()?;
 
 let response = client
-    .openai()
-    .responses()
+    .openai()?                 // Client 可能未配置该 Provider
+    .chat()
     .create(
-        ResponsesRequest::builder()
-            .model("gpt-5")
-            .input("Hello")
+        ChatCompletionRequest::builder()
+            .model("gpt-4o-mini")
+            .user("Hello")
             .build()?,
     )
     .await?;
@@ -952,7 +951,7 @@ tests/fixtures/
 
 ## 11. 当前状态
 
-**M0（Workspace 接线）与 M1（`airx-core` 契约层）已完成。**
+**M0–M9 已全部完成**（边界见下方“已知缺口”）。
 
 M0：
 
@@ -974,11 +973,90 @@ M1（`airx-core`，纯函数、无 IO、无 async、无时钟）：
 | `stream::json_accumulator` | 增量结构判定（`Empty` / `Incomplete` / `Complete` / `Malformed`）、只扫描增量、不完整时给出明确状态 |
 | `stream::status` | `StreamStatus` 五态，`Incomplete` 与 `Failed` 分离 |
 
-测试：60 个用例（57 单元 + 3 集成），覆盖 SSE 在 1..N 每个字节边界切分、UTF-8 跨 chunk、CRLF/CR、BOM、截断流、增量 JSON 的逐字节切分与非法尾随内容。已通过 `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`./scripts/check-deps.sh` 与 wasm32 编译。
+M2（`airx-transport`，唯一 IO 层）：
 
-暂缓：`json::canonical`（RFC 8785 JCS，M9）、真实 API fixtures（随 M3 起进入）。
+| 模块 | 已实现 |
+| --- | --- |
+| `transport` | 对象安全 `Transport`（`BoxFuture`）、`&T` / `Arc<T>` 转发、Native 要求 `Send + Sync`、WASM 去掉该约束 |
+| `mock` | 响应队列、流式响应、错误注入、请求记录；克隆共享状态 |
+| `native` | Reqwest 实现、超时、请求映射、错误分类（connect / timeout / body / TLS / other）并保留 source |
+| `stream` / `response` | `ByteStream`、`HttpStreamResponse`、`ResponseMetadata` 与常见 request id Header |
+| `retry` | `RetryPolicy`（默认关闭、指数退避、上限）、`Retry-After`、幂等感知：Connect 任意方法 / Timeout 与 5xx 仅幂等方法 / 429 任意方法；流式不重试 |
+| `middleware` | 同步中间件链（请求正序、响应逆序），流式响应不触发 `on_response` |
 
-下一步 **M2**：`airx-transport` 的 `Transport` trait → Mock → native(reqwest) → 字节流读取 → 错误映射与 `ResponseMetadata` → 超时/取消 → `retry` / `middleware`。
+M3（端到端竖切，契约冻结）：
+
+| 契约 | 实现 |
+| --- | --- |
+| Protocol | `airx_protocol::Endpoint`（`encode` / `decode`，纯函数）；`openai::chat` 的 Request / Message / Response / Endpoint / 错误映射 / `OpenAiConfig`（Debug 脱敏、base_url 校验） |
+| Transport | 固定错误形状 + `BoxFuture` + Mock/Reqwest 双实现 |
+| Client | `Client` / `ClientBuilder` / `OpenAiBuilder` / typed `chat().create()`；执行级 Header 不覆盖协议 Header；`openai()` 返回 `Result` 以表达“未配置该 Provider” |
+| 端到端 | Mock 驱动的 8 个集成用例：全链路、Provider 错误、Header 优先级、默认不重试、429 重试、base_url 覆盖、未配置 Provider、扩展字段透传 |
+
+M4（OpenAI Chat 完整化与流式）：
+
+| 能力 | 实现 |
+| --- | --- |
+| 请求 | tools / tool_choice / parallel_tool_calls / response_format（json_schema）/ stream / stream_options |
+| 消息 | 多模态 user parts、assistant tool_calls、tool 结果 |
+| 事件 | `ChatStreamEvent::{Chunk, Done}`、chunk/delta/tool_calls 增量、usage chunk |
+| 聚合 | `ChatStreamAccumulator`：合并文本与工具参数，未收到 `[DONE]` 报 `Incomplete` |
+| 契约 | `StreamingEndpoint` + `ProtocolStream`：字节流 → SSE → 协议事件，非 2xx 先读完 body 再映射错误 |
+
+M5（OpenAI Responses）：
+
+| 能力 | 实现 |
+| --- | --- |
+| 请求 | input（文本 / item）、instructions、max_output_tokens、tools、stream |
+| 响应 | OutputItem（message / function_call）、`Other(Value)` 保留未知 item / content |
+| 事件 | created / output_item.added·done / output_text.delta·done / function_call_arguments.delta·done / completed / failed / incomplete / error / `Unknown(Value)` |
+| 聚合 | `ResponsesStreamAccumulator`：完成后优先使用服务端完整响应，否则合成累积 item |
+
+M6（Anthropic Messages）：
+
+| 能力 | 实现 |
+| --- | --- |
+| 请求 | system、max_tokens、temperature / top_p / top_k / stop_sequences、tools / tool_choice、thinking |
+| 内容块 | text / image / tool_use / tool_result / thinking / redacted_thinking / `Other(Value)` |
+| 事件 | message_start / content_block_start·delta·stop / message_delta / message_stop / ping / error / `Unknown(Value)` |
+| 聚合 | `MessagesStreamAccumulator`：tool 参数增量拼接后解析，`message_stop` 前终止报 `Incomplete` |
+
+M7（DeepSeek）：
+
+- 独立 `DeepSeekConfig` / `ChatEndpoint` / 错误映射（ProviderId = deepseek）。
+- 复用 OpenAI Chat 结构，但明确限定为“语义一致的部分”，不是别名。
+- `DeepSeekPolicy`：reasoner 的 temperature / top_p 在 Strict 下报错，BestEffort 下降级并产生警告。
+
+M8（Unified）：
+
+- 统一 `Content` / `Message` / `GenerateRequest` / `GenerateResponse` / `TokenUsage`。
+- 纯函数 Adapter：OpenAI、Anthropic、DeepSeek；`Custom` 在 Anthropic 侧以 `Other(Value)` 保留。
+- `capabilities(provider, model)`：已知模型给表，未知模型一律 `Unknown`。
+- `Client::generate`（Strict）/ `generate_best_effort`（降级 + `GenerateResponse.warnings`）。
+- Provider 选择：显式 `.provider(...)`，否则按模型名推断。
+
+M9（生产化）：
+
+| 项 | 实现 |
+| --- | --- |
+| WASM | `WasmTransport`：Fetch 请求、Header 转换、`ReadableStream` 流式；`wasm32` 编译检查通过 |
+| 可观测 | `tracing` 请求 / 响应 / 流建立 / 重试事件；不记录敏感 Header |
+| CI | fmt / clippy / test / rustdoc（`-D warnings`）/ 依赖方向 / 最小 feature / wasm32（含 unified） |
+| 文档 | `protocol-support.md`、`compatibility.md`、README 快速开始与 Feature 表 |
+| 示例 | `chat`、`chat_stream`、`unified` |
+
+测试总计 **163** 个，`cargo test --workspace --features airx/anthropic,airx/deepseek,airx/unified` 全绿。
+覆盖 SSE 任意字节切分、UTF-8 跨 chunk、CRLF/CR、BOM、截断流、增量 JSON、三个 Provider 的
+流式事件与聚合、错误映射、重试幂等分支、Header 优先级、Unified 的 Strict/BestEffort。
+
+**已知缺口（有意保留，且不会静默降级）**：
+
+1. `JsonMode::Canonical`（RFC 8785 JCS）未实现，返回明确错误；不做“近似规范化”。
+2. WASM 传输只做了编译检查，浏览器运行时（CORS、受限 Header、流读取）尚未纳入 CI。
+3. 中间件为同步实现；异步中间件（如 Token 刷新）请自定义 `Transport`。
+4. 流式请求不重试；首事件前重试留待后续。
+5. `Option<T>` 不区分 `null` 与缺省；字节 / null 级保真需使用 `RawJson`（见 `docs/compatibility.md`）。
+
 
 ---
 

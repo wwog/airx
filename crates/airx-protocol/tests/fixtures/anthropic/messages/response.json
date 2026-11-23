@@ -1,0 +1,19 @@
+{
+  "id": "msg_123",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-3-5-sonnet",
+  "content": [
+    { "type": "thinking", "thinking": "需要查询天气", "signature": "sig_1" },
+    { "type": "text", "text": "我来查一下。" },
+    { "type": "tool_use", "id": "toolu_1", "name": "lookup", "input": { "q": "singapore" } },
+    { "type": "server_tool_use", "id": "srv_1" }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 20,
+    "output_tokens": 15,
+    "cache_read_input_tokens": 8
+  }
+}

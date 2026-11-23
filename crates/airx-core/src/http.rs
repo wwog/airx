@@ -8,7 +8,7 @@
 
 use bytes::Bytes;
 
-pub use ::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
+pub use ::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 
 /// 待执行的 HTTP 请求。
 #[derive(Debug, Clone)]

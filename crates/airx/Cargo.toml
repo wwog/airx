@@ -19,9 +19,9 @@ native-tls = ["airx-transport/native-tls"]
 wasm = ["airx-transport/wasm"]
 
 # Provider
-openai = ["airx-protocol/openai"]
-anthropic = ["airx-protocol/anthropic"]
-deepseek = ["airx-protocol/deepseek"]
+openai = ["airx-protocol/openai", "airx-unified?/openai"]
+anthropic = ["airx-protocol/anthropic", "airx-unified?/anthropic"]
+deepseek = ["airx-protocol/deepseek", "airx-unified?/deepseek"]
 all-providers = ["openai", "anthropic", "deepseek"]
 
 # 能力
@@ -34,3 +34,38 @@ airx-core = { path = "../airx-core", default-features = false }
 airx-protocol = { path = "../airx-protocol", default-features = false }
 airx-transport = { path = "../airx-transport", default-features = false }
 airx-unified = { path = "../airx-unified", optional = true }
+futures-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+serde_json.workspace = true
+bytes.workspace = true
+dotenvy.workspace = true
+
+[[example]]
+name = "chat"
+required-features = ["openai"]
+
+[[example]]
+name = "chat_stream"
+required-features = ["openai", "stream"]
+
+[[example]]
+name = "unified"
+required-features = ["unified", "openai"]
+
+[[example]]
+name = "opencode_text"
+required-features = ["openai"]
+
+[[example]]
+name = "opencode_stream"
+required-features = ["openai", "stream"]
+
+[[example]]
+name = "opencode_retry"
+required-features = ["openai", "native"]
+
+[[example]]
+name = "opencode_full"
+required-features = ["openai", "unified"]

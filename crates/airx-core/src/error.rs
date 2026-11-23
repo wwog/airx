@@ -376,6 +376,11 @@ impl StreamError {
         Self::new(StreamErrorKind::Incomplete, message)
     }
 
+    /// 协议层明确报告失败。
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self::new(StreamErrorKind::Failed, message)
+    }
+
     /// 状态机非预期转换。
     pub fn invalid_state(message: impl Into<String>) -> Self {
         Self::new(StreamErrorKind::InvalidState, message)
@@ -403,6 +408,9 @@ pub enum StreamErrorKind {
     /// 流不完整。
     #[error("incomplete stream")]
     Incomplete,
+    /// 协议层报告失败。
+    #[error("stream failed")]
+    Failed,
     /// 状态机处于非法状态。
     #[error("invalid stream state")]
     InvalidState,
