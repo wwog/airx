@@ -47,10 +47,18 @@
 
 ## 5. DeepSeek 兼容策略
 
-- 默认 `Strict`：`deepseek-reasoner` 携带 `temperature` / `top_p` 直接报 `Compatibility` 错误。
-- `BestEffort`：移除不支持的参数，并在 `Adapted.warnings` 中记录。
+- 默认 `Strict`，`BestEffort` 在 `Adapted.warnings` 中记录降级原因。
+- thinking 判定：显式 `extensions.thinking.type` 优先；否则看 `reasoning_effort`
+  （`none` 关闭，其它值开启）；两者都缺省时按文档**默认开启**。
 
-策略只存在于 `deepseek::compatibility`，不进入 OpenAI 类型。
+| 情况 | Strict | BestEffort |
+| --- | --- | --- |
+| thinking + `temperature` | 报 `Compatibility` | 移除 temperature + Warning |
+| thinking + `tool_choice=required/指定工具` | 报 `Compatibility` | 降级为 `auto` + Warning |
+| `response_format=json_schema` | 报 `Compatibility` | 降级为 `json_object` + Warning |
+
+`top_p` 的行为随模型与模式变化（部分模式固定为 1.0/0.95），策略不做强制改写，
+请在接入具体模型时按官方文档核对。策略只存在于 `deepseek::compatibility`，不进入 OpenAI 类型。
 
 ## 6. Unified 兼容模式
 
@@ -67,10 +75,38 @@
 | ToolResult | `tool` 消息 | `tool_result` block |
 | Thinking | 不可表达（Strict 报错） | 不可回传（缺 signature，Strict 报错） |
 | Custom | 不可表达（Strict 报错） | `Other(Value)` 原样保留 |
+| max_tokens | 映射为 `max_completion_tokens` | `max_tokens`（必填，默认 4096） |
+| temperature / top_p | 透传（模型相关） | 已移除 → Strict 报错 / BestEffort 丢弃 |
 
-ANTHROPIC 的 `max_tokens` 必填：未设置时统一层默认使用 4096。
+## 7. 服务端联网工具
 
-## 7. 能力判定
+服务端工具（OpenAI Responses `web_search`、Anthropic `web_search_*`、DeepSeek
+`deepseek_web_search` / `deepseek_read_url`）的联网请求发生在 **Provider 后台**：
+
+- airx 只负责声明工具、解析 `web_search_call` / `server_tool_use` / `web_search_tool_result` /
+  `annotations` 等结果。
+- SDK 不会为了这些工具发起任何本地 HTTP 请求，也不代理搜索结果。
+- 客户端 function tool 相反：模型返回 `tool_calls`，由应用执行并回传结果。
+- 网关是否透传服务端工具由网关决定，需用真实请求验证。
+
+## 8. 参数随模型变化（2026-11 对齐）
+
+- **Anthropic**：最新 Messages API 已移除 `temperature` / `top_p` / `top_k`。
+  用 `output_config.effort` 控制推理投入，用 `output_config.format` 做结构化输出。
+  `thinking` 支持 `enabled`（预算）/ `disabled` / `between_tools` / `adaptive`。
+- **OpenAI Chat**：`max_tokens` 已标记 deprecated，且与 o-series 不兼容；
+  新代码使用 `max_completion_tokens`（包含推理 token）。`reasoning_effort` 取值
+  `none|minimal|low|medium|high|xhigh|max`（模型相关），`verbosity` 取值 `low|medium|high`。
+- **OpenAI Responses**：使用 `max_output_tokens`；推理用 `reasoning.effort`；
+  结构化输出用 `text.format`（`json_schema`）。
+- **DeepSeek**：当前文档模型为 `deepseek-flash` / `deepseek-v4-pro`；
+  `reasoning_effort` 取 `none|low|high|max`（`minimal→low`，`medium/xhigh→high`）；
+  `response_format` 不支持 `json_schema`。
+
+参数对齐会随官方版本演进；发现模型行为变化时，优先更新本节与
+[protocol-support.md](protocol-support.md)，再改代码。
+
+## 9. 能力判定
 
 `airx_unified::capabilities(provider, model)` 基于模型名给出已知模型的能力；
 未知模型一律 `Unknown`。`Unknown` 不等于 `Unsupported`：调用方不应假定能力可用，

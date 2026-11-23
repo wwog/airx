@@ -7,7 +7,7 @@
     { "type": "thinking", "thinking": "需要查询天气", "signature": "sig_1" },
     { "type": "text", "text": "我来查一下。" },
     { "type": "tool_use", "id": "toolu_1", "name": "lookup", "input": { "q": "singapore" } },
-    { "type": "server_tool_use", "id": "srv_1" }
+    { "type": "server_tool_use", "id": "srv_1", "name": "web_search", "input": { "query": "weather" } }
   ],
   "stop_reason": "tool_use",
   "stop_sequence": null,

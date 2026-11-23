@@ -4,7 +4,7 @@
 //! 仍可透传，而不是反序列化失败。
 
 use airx_core::json::Extensions;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 /// Responses 用量。
@@ -82,20 +82,20 @@ impl ResponsesResponse {
 }
 
 /// 输出 item。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum OutputItem {
     /// 消息。
     Message(MessageItem),
     /// 函数调用。
     FunctionCall(FunctionCallItem),
+    /// 服务端联网搜索调用（OpenAI 后台执行）。
+    WebSearchCall(WebSearchCallItem),
     /// 未识别类型（原样保留）。
     Other(Value),
 }
 
 /// 消息 item。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "message")]
 pub struct MessageItem {
     /// item ID。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,8 +113,7 @@ pub struct MessageItem {
 }
 
 /// 消息内容。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum OutputContent {
     /// 输出文本。
     OutputText(OutputText),
@@ -126,13 +125,12 @@ pub enum OutputContent {
 
 /// 输出文本。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "output_text")]
 pub struct OutputText {
     /// 文本。
     pub text: String,
     /// 引用标注。
     #[serde(default)]
-    pub annotations: Vec<Value>,
+    pub annotations: Vec<Annotation>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -140,7 +138,6 @@ pub struct OutputText {
 
 /// 拒答内容。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "refusal")]
 pub struct RefusalContent {
     /// 拒答文本。
     pub refusal: String,
@@ -151,7 +148,6 @@ pub struct RefusalContent {
 
 /// 函数调用 item。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "function_call")]
 pub struct FunctionCallItem {
     /// item ID。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,6 +161,50 @@ pub struct FunctionCallItem {
     /// 状态。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 服务端联网搜索调用。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WebSearchCallItem {
+    /// item ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// 状态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// 搜索动作（查询、来源等，随官方结构演进，原样保留）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<Value>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 文本引用标注。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Annotation {
+    /// URL 引用。
+    UrlCitation(UrlCitation),
+    /// 未识别标注。
+    Other(Value),
+}
+
+/// URL 引用。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UrlCitation {
+    /// 来源 URL。
+    pub url: String,
+    /// 标题。
+    pub title: String,
+    /// 在文本中的起始位置。
+    #[serde(default)]
+    pub start_index: u32,
+    /// 在文本中的结束位置。
+    #[serde(default)]
+    pub end_index: u32,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -215,4 +255,182 @@ mod tests {
             other => panic!("unexpected: {other:?}"),
         }
     }
+}
+
+#[cfg(test)]
+mod server_tool_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn web_search_call_and_url_citation_are_typed() {
+        let json = json!({
+            "id": "resp_1",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "id": "ws_1",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "rust news"}
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "rust news",
+                        "annotations": [{
+                            "type": "url_citation",
+                            "url": "https://example.com/rust",
+                            "title": "Rust",
+                            "start_index": 0,
+                            "end_index": 4
+                        }]
+                    }]
+                }
+            ]
+        });
+
+        let response: ResponsesResponse = serde_json::from_value(json.clone()).expect("response");
+        assert!(matches!(response.output[0], OutputItem::WebSearchCall(_)));
+
+        match &response.output[1] {
+            OutputItem::Message(message) => match &message.content[0] {
+                OutputContent::OutputText(text) => match &text.annotations[0] {
+                    Annotation::UrlCitation(citation) => {
+                        assert_eq!(citation.url, "https://example.com/rust");
+                        assert_eq!(citation.end_index, 4);
+                    }
+                    other => panic!("unexpected annotation: {other:?}"),
+                },
+                other => panic!("unexpected content: {other:?}"),
+            },
+            other => panic!("unexpected item: {other:?}"),
+        }
+
+        assert_eq!(serde_json::to_value(&response).expect("serialize"), json);
+    }
+}
+
+impl Serialize for OutputItem {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let (kind, value) = match self {
+            Self::Message(item) => ("message", serde_json::to_value(item)),
+            Self::FunctionCall(item) => ("function_call", serde_json::to_value(item)),
+            Self::WebSearchCall(item) => ("web_search_call", serde_json::to_value(item)),
+            Self::Other(value) => return value.serialize(serializer),
+        };
+        inject_type(kind, value, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OutputItem {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = Value::deserialize(deserializer)?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+
+        macro_rules! parse {
+            ($ty:ty, $variant:ident) => {{
+                remove_type(&mut value);
+                return serde_json::from_value::<$ty>(value)
+                    .map(Self::$variant)
+                    .map_err(serde::de::Error::custom);
+            }};
+        }
+
+        match kind.as_str() {
+            "message" => parse!(MessageItem, Message),
+            "function_call" => parse!(FunctionCallItem, FunctionCall),
+            "web_search_call" => parse!(WebSearchCallItem, WebSearchCall),
+            _ => Ok(Self::Other(value)),
+        }
+    }
+}
+
+impl Serialize for OutputContent {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let (kind, value) = match self {
+            Self::OutputText(content) => ("output_text", serde_json::to_value(content)),
+            Self::Refusal(content) => ("refusal", serde_json::to_value(content)),
+            Self::Other(value) => return value.serialize(serializer),
+        };
+        inject_type(kind, value, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OutputContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = Value::deserialize(deserializer)?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+
+        macro_rules! parse {
+            ($ty:ty, $variant:ident) => {{
+                remove_type(&mut value);
+                return serde_json::from_value::<$ty>(value)
+                    .map(Self::$variant)
+                    .map_err(serde::de::Error::custom);
+            }};
+        }
+
+        match kind.as_str() {
+            "output_text" => parse!(OutputText, OutputText),
+            "refusal" => parse!(RefusalContent, Refusal),
+            _ => Ok(Self::Other(value)),
+        }
+    }
+}
+
+impl Serialize for Annotation {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let (kind, value) = match self {
+            Self::UrlCitation(citation) => ("url_citation", serde_json::to_value(citation)),
+            Self::Other(value) => return value.serialize(serializer),
+        };
+        inject_type(kind, value, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Annotation {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = Value::deserialize(deserializer)?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+
+        if kind == "url_citation" {
+            remove_type(&mut value);
+            return serde_json::from_value::<UrlCitation>(value)
+                .map(Self::UrlCitation)
+                .map_err(serde::de::Error::custom);
+        }
+        Ok(Self::Other(value))
+    }
+}
+
+fn remove_type(value: &mut Value) {
+    if let Value::Object(map) = value {
+        map.remove("type");
+    }
+}
+
+fn inject_type<S: Serializer>(
+    kind: &str,
+    value: Result<Value, serde_json::Error>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut value = value.map_err(serde::ser::Error::custom)?;
+    if let Value::Object(map) = &mut value {
+        map.insert("type".to_owned(), Value::String(kind.to_owned()));
+    }
+    value.serialize(serializer)
 }

@@ -24,6 +24,9 @@ pub struct Usage {
     /// 输出明细。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_tokens_details: Option<Value>,
+    /// 服务端工具使用统计（如 DeepSeek 的搜索/抓取次数）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_tool_use: Option<Value>,
     /// 未识别的 Provider 扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,

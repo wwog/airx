@@ -33,6 +33,8 @@ struct ChoiceState {
     content: String,
     has_content: bool,
     reasoning: String,
+    annotations: Option<Vec<serde_json::Value>>,
+    server_tool_calls: Option<Vec<serde_json::Value>>,
     refusal: Option<String>,
     tool_calls: BTreeMap<u32, ToolCallState>,
     finish_reason: Option<String>,
@@ -148,6 +150,8 @@ impl ChatStreamAccumulator {
                         content: state.has_content.then(|| state.content.clone()),
                         refusal: state.refusal.clone(),
                         tool_calls: build_tool_calls(&state.tool_calls),
+                        annotations: state.annotations.clone(),
+                        server_tool_calls: state.server_tool_calls.clone(),
                         extensions: message_extensions,
                     },
                     finish_reason: state.finish_reason.clone(),
@@ -180,6 +184,12 @@ fn apply_choice(state: &mut ChoiceState, choice: ChunkChoice) {
     }
     if let Some(reasoning) = choice.delta.reasoning_content {
         state.reasoning.push_str(&reasoning);
+    }
+    if choice.delta.annotations.is_some() {
+        state.annotations = choice.delta.annotations;
+    }
+    if choice.delta.server_tool_calls.is_some() {
+        state.server_tool_calls = choice.delta.server_tool_calls;
     }
     if let Some(tool_calls) = choice.delta.tool_calls {
         for call in tool_calls {

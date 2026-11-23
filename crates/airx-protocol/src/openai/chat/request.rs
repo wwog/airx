@@ -7,6 +7,8 @@ use airx_core::model::ModelId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::openai::common::reasoning::{ReasoningEffort, Verbosity};
+
 use super::message::ChatMessage;
 use super::tool::{ResponseFormat, Tool, ToolChoice};
 
@@ -23,9 +25,18 @@ pub struct ChatCompletionRequest {
     /// 核采样。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
-    /// 最大输出 token。
+    /// 最大输出 token（已弃用；o-series 不兼容，推荐 `max_completion_tokens`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// 最大输出 token（含推理 token，官方推荐字段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
+    /// 推理投入等级。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// 输出详尽程度。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<Verbosity>,
     /// 停止序列。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
@@ -78,6 +89,9 @@ pub struct ChatCompletionRequestBuilder {
     temperature: Option<f32>,
     top_p: Option<f32>,
     max_tokens: Option<u32>,
+    max_completion_tokens: Option<u32>,
+    reasoning_effort: Option<ReasoningEffort>,
+    verbosity: Option<Verbosity>,
     stop: Option<Vec<String>>,
     user: Option<String>,
     tools: Option<Vec<Tool>>,
@@ -140,6 +154,27 @@ impl ChatCompletionRequestBuilder {
     #[must_use]
     pub fn max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// 设置 `max_completion_tokens`（推荐；包含推理 token）。
+    #[must_use]
+    pub fn max_completion_tokens(mut self, max_completion_tokens: u32) -> Self {
+        self.max_completion_tokens = Some(max_completion_tokens);
+        self
+    }
+
+    /// 设置推理投入等级。
+    #[must_use]
+    pub fn reasoning_effort(mut self, reasoning_effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(reasoning_effort);
+        self
+    }
+
+    /// 设置输出详尽程度。
+    #[must_use]
+    pub fn verbosity(mut self, verbosity: Verbosity) -> Self {
+        self.verbosity = Some(verbosity);
         self
     }
 
@@ -224,6 +259,9 @@ impl ChatCompletionRequestBuilder {
             temperature: self.temperature,
             top_p: self.top_p,
             max_tokens: self.max_tokens,
+            max_completion_tokens: self.max_completion_tokens,
+            reasoning_effort: self.reasoning_effort,
+            verbosity: self.verbosity,
             stop: self.stop,
             user: self.user,
             tools: self.tools,
@@ -325,5 +363,29 @@ mod tests {
 
         let value = serde_json::to_value(&request).expect("serialize");
         assert_eq!(value["logit_bias"]["50256"], -100);
+    }
+}
+
+#[cfg(test)]
+mod modern_params_tests {
+    use super::*;
+    use crate::openai::common::reasoning::{ReasoningEffort, Verbosity};
+
+    #[test]
+    fn max_completion_tokens_and_output_controls_serialize() {
+        let request = ChatCompletionRequest::builder()
+            .model("o3")
+            .user("hi")
+            .max_completion_tokens(128)
+            .reasoning_effort(ReasoningEffort::High)
+            .verbosity(Verbosity::Low)
+            .build()
+            .expect("request");
+
+        let value = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(value["max_completion_tokens"], 128);
+        assert_eq!(value["reasoning_effort"], "high");
+        assert_eq!(value["verbosity"], "low");
+        assert!(value.get("max_tokens").is_none());
     }
 }

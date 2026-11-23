@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let request = ChatCompletionRequest::builder()
             .model(model.clone())
             .user("只回复两个字：重试成功")
-            .max_tokens(256)
+            .max_completion_tokens(256)
             .build()?;
 
         let response = client.openai()?.chat().create(request).await?;

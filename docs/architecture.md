@@ -1057,6 +1057,17 @@ M9（生产化）：
 4. 流式请求不重试；首事件前重试留待后续。
 5. `Option<T>` 不区分 `null` 与缺省；字节 / null 级保真需使用 `RawJson`（见 `docs/compatibility.md`）。
 
+**接口对齐（2026-11-23）**：按官方 SDK / API 文档更新协议模型——Anthropic 移除
+`temperature` / `top_p` / `top_k`，新增 `output_config`（`effort` / `format`）与四种
+`thinking` 形态；OpenAI `max_tokens` 弃用，新增 `max_completion_tokens` /
+`reasoning_effort` / `verbosity`，Responses 增加 `reasoning.effort` 与 `text.format`；
+DeepSeek 兼容策略覆盖 thinking 模式与 `response_format` 限制。细节与来源见
+`docs/protocol-support.md`。
+
+服务端联网工具（`web_search` / `web_fetch` / `deepseek_web_search`）按 Provider 建模：
+工具声明与结果（`web_search_call`、`server_tool_use`、`web_search_tool_result`、
+`annotations`）进协议层，联网请求由 Provider 后台执行，airx 不代发。
+
 
 ---
 

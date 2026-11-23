@@ -167,6 +167,12 @@ pub struct ResponseMessage {
     /// 工具调用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// 引用标注（服务端联网工具返回，例如 DeepSeek / OpenAI web search）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Vec<serde_json::Value>>,
+    /// 服务端工具调用记录（DeepSeek）。原样回传即可保持多轮上下文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_tool_calls: Option<Vec<serde_json::Value>>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -234,5 +240,36 @@ mod tests {
         let message: ResponseMessage = serde_json::from_str(json).expect("deserialize");
         assert_eq!(message.content, None);
         assert!(message.extensions.contains_key("audio"));
+    }
+}
+
+#[cfg(test)]
+mod server_tool_result_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn annotations_and_server_tool_calls_are_typed() {
+        let json = json!({
+            "role": "assistant",
+            "content": "today in rust",
+            "annotations": [{
+                "type": "url_citation",
+                "url": "https://example.com/rust",
+                "title": "Rust news"
+            }],
+            "server_tool_calls": [{
+                "type": "web_search",
+                "id": "search_1",
+                "status": "completed"
+            }]
+        });
+
+        let message: ResponseMessage = serde_json::from_value(json.clone()).expect("message");
+        assert_eq!(message.annotations.as_ref().map(Vec::len), Some(1));
+        assert_eq!(message.server_tool_calls.as_ref().map(Vec::len), Some(1));
+
+        let value = serde_json::to_value(&message).expect("serialize");
+        assert_eq!(value, json);
     }
 }

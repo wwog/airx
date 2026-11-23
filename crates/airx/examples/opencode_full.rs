@@ -71,7 +71,7 @@ async fn structured_output(client: &Client, model: &str) -> Result<(), Box<dyn s
                 extensions: Extensions::new(),
             },
         })
-        .max_tokens(1024)
+        .max_completion_tokens(1024)
         .build()?;
 
     let response = client.openai()?.chat().create(request).await?;
@@ -129,7 +129,7 @@ async fn tool_calling(client: &Client, model: &str) -> Result<(), Box<dyn std::e
         .user(user_prompt)
         .tools(tools)
         .tool_choice(ToolChoice::auto())
-        .max_tokens(512)
+        .max_completion_tokens(512)
         .build()?;
 
     let response = client.openai()?.chat().create(first).await?;
@@ -170,7 +170,7 @@ async fn tool_calling(client: &Client, model: &str) -> Result<(), Box<dyn std::e
             }),
             Some("获取城市当前天气".to_owned()),
         )])
-        .max_tokens(512)
+        .max_completion_tokens(512)
         .build()?;
 
     let final_response = client.openai()?.chat().create(second).await?;

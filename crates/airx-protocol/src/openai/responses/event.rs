@@ -3,14 +3,13 @@
 //! 未知事件保留为 `Unknown(Value)`：Provider 新增事件类型时不会导致解码失败。
 
 use airx_core::json::Extensions;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use super::response::{OutputItem, ResponsesResponse};
 
 /// Responses 流事件。
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ResponsesEvent {
     /// `response.created`
     Created(CreatedEvent),
@@ -40,18 +39,21 @@ pub enum ResponsesEvent {
 
 impl<'de> Deserialize<'de> for ResponsesEvent {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = Value::deserialize(deserializer)?;
+        let mut value = Value::deserialize(deserializer)?;
         let kind = value
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
 
         macro_rules! parse {
-            ($ty:ty, $variant:ident) => {
+            ($ty:ty, $variant:ident) => {{
+                if let Value::Object(map) = &mut value {
+                    map.remove("type");
+                }
                 return serde_json::from_value::<$ty>(value)
                     .map(Self::$variant)
-                    .map_err(serde::de::Error::custom)
-            };
+                    .map_err(serde::de::Error::custom);
+            }};
         }
 
         match kind {
@@ -77,7 +79,6 @@ impl<'de> Deserialize<'de> for ResponsesEvent {
 
 /// `response.created`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "response.created")]
 pub struct CreatedEvent {
     /// 序号。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,7 +92,6 @@ pub struct CreatedEvent {
 
 /// `response.output_item.added`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "response.output_item.added")]
 pub struct OutputItemAdded {
     /// 序号。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,7 +107,6 @@ pub struct OutputItemAdded {
 
 /// `response.output_item.done`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "response.output_item.done")]
 pub struct OutputItemDone {
     /// 序号。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,7 +122,6 @@ pub struct OutputItemDone {
 
 /// `response.output_text.delta`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "response.output_text.delta")]
 pub struct OutputTextDelta {
     /// item ID。
     pub item_id: String,
@@ -144,7 +142,6 @@ pub struct OutputTextDelta {
 
 /// `response.output_text.done`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "response.output_text.done")]
 pub struct OutputTextDone {
     /// item ID。
     pub item_id: String,
@@ -165,7 +162,6 @@ pub struct OutputTextDone {
 
 /// `response.function_call_arguments.delta`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "response.function_call_arguments.delta")]
 pub struct ArgumentsDelta {
     /// item ID。
     pub item_id: String,
@@ -183,7 +179,6 @@ pub struct ArgumentsDelta {
 
 /// `response.function_call_arguments.done`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "response.function_call_arguments.done")]
 pub struct ArgumentsDone {
     /// item ID。
     pub item_id: String,
@@ -201,7 +196,6 @@ pub struct ArgumentsDone {
 
 /// `response.completed`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "response.completed")]
 pub struct CompletedEvent {
     /// 序号。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -215,7 +209,6 @@ pub struct CompletedEvent {
 
 /// `response.failed`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "response.failed")]
 pub struct FailedEvent {
     /// 序号。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -229,7 +222,6 @@ pub struct FailedEvent {
 
 /// `response.incomplete`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "response.incomplete")]
 pub struct IncompleteEvent {
     /// 序号。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,7 +235,6 @@ pub struct IncompleteEvent {
 
 /// `error`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "error")]
 pub struct ErrorEvent {
     /// 错误码。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -256,6 +247,44 @@ pub struct ErrorEvent {
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
+}
+
+impl Serialize for ResponsesEvent {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let (kind, value) = match self {
+            Self::Created(event) => ("response.created", serde_json::to_value(event)),
+            Self::OutputItemAdded(event) => {
+                ("response.output_item.added", serde_json::to_value(event))
+            }
+            Self::OutputItemDone(event) => {
+                ("response.output_item.done", serde_json::to_value(event))
+            }
+            Self::OutputTextDelta(event) => {
+                ("response.output_text.delta", serde_json::to_value(event))
+            }
+            Self::OutputTextDone(event) => {
+                ("response.output_text.done", serde_json::to_value(event))
+            }
+            Self::FunctionCallArgumentsDelta(event) => (
+                "response.function_call_arguments.delta",
+                serde_json::to_value(event),
+            ),
+            Self::FunctionCallArgumentsDone(event) => (
+                "response.function_call_arguments.done",
+                serde_json::to_value(event),
+            ),
+            Self::Completed(event) => ("response.completed", serde_json::to_value(event)),
+            Self::Failed(event) => ("response.failed", serde_json::to_value(event)),
+            Self::Incomplete(event) => ("response.incomplete", serde_json::to_value(event)),
+            Self::Error(event) => ("error", serde_json::to_value(event)),
+            Self::Unknown(value) => return value.serialize(serializer),
+        };
+        let mut value = value.map_err(serde::ser::Error::custom)?;
+        if let Value::Object(map) = &mut value {
+            map.insert("type".to_owned(), Value::String(kind.to_owned()));
+        }
+        value.serialize(serializer)
+    }
 }
 
 #[cfg(test)]

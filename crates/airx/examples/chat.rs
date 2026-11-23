@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .model("gpt-4o-mini")
         .system("You are a concise assistant.")
         .user("Say hello in Chinese.")
-        .max_tokens(64)
+        .max_completion_tokens(64)
         .build()?;
 
     let response = client.openai()?.chat().create(request).await?;

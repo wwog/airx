@@ -95,7 +95,11 @@ pub fn to_openai(
         messages,
         temperature: request.options.temperature,
         top_p: request.options.top_p,
-        max_tokens: request.options.max_tokens,
+        // 对齐最新 Chat API：统一层的 max_tokens 映射到 max_completion_tokens。
+        max_tokens: None,
+        max_completion_tokens: request.options.max_tokens,
+        reasoning_effort: None,
+        verbosity: None,
         stop: (!request.options.stop.is_empty()).then(|| request.options.stop.clone()),
         user: None,
         tools,
@@ -378,5 +382,24 @@ mod tests {
             .content
             .retain(|content| !matches!(content, Content::Text(_)));
         assert_eq!(unified.text(), "");
+    }
+}
+
+#[cfg(test)]
+mod alignment_tests {
+    use super::*;
+
+    #[test]
+    fn unified_max_tokens_maps_to_max_completion_tokens() {
+        let request = GenerateRequest::builder()
+            .model("gpt-5")
+            .user("hi")
+            .max_tokens(32)
+            .build()
+            .expect("request");
+
+        let adapted = to_openai(&request, CompatibilityMode::Strict).expect("adapt");
+        assert_eq!(adapted.native.max_completion_tokens, Some(32));
+        assert_eq!(adapted.native.max_tokens, None);
     }
 }

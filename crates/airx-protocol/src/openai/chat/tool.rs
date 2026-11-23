@@ -4,10 +4,24 @@ use airx_core::json::Extensions;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// 工具定义。
+/// 工具声明。
+///
+/// - `Function`：客户端执行的自定义函数。
+/// - `Other`：Provider 服务端工具（如 DeepSeek 的 `deepseek_web_search`）
+///   或未来新增工具，原样透传。服务端工具由 Provider 后台执行，SDK 不发起网络请求。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Tool {
-    /// 工具类型，目前为 `function`。
+#[serde(untagged)]
+pub enum Tool {
+    /// 自定义函数工具。
+    Function(FunctionTool),
+    /// 服务端工具 / 未知工具。
+    Other(Value),
+}
+
+/// 函数工具定义。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FunctionTool {
+    /// 工具类型，`function`。
     #[serde(rename = "type")]
     pub kind: String,
     /// 函数定义。
@@ -17,13 +31,9 @@ pub struct Tool {
     pub extensions: Extensions,
 }
 
-impl Tool {
+impl FunctionTool {
     /// 构造 function 工具。
-    pub fn function(
-        name: impl Into<String>,
-        parameters: Value,
-        description: Option<String>,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, parameters: Value, description: Option<String>) -> Self {
         Self {
             kind: "function".to_owned(),
             function: FunctionDefinition {
@@ -35,6 +45,29 @@ impl Tool {
             },
             extensions: Extensions::new(),
         }
+    }
+}
+
+impl Tool {
+    /// 构造 function 工具。
+    pub fn function(
+        name: impl Into<String>,
+        parameters: Value,
+        description: Option<String>,
+    ) -> Self {
+        Self::Function(FunctionTool::new(name, parameters, description))
+    }
+
+    /// 声明一个服务端工具（例如 `deepseek_web_search`）。
+    ///
+    /// 只发送声明，实际联网与结果生成由 Provider 后台完成。
+    pub fn server(kind: impl Into<String>) -> Self {
+        Self::Other(serde_json::json!({ "type": kind.into() }))
+    }
+
+    /// 以原始 JSON 声明工具。
+    pub fn raw(value: Value) -> Self {
+        Self::Other(value)
     }
 }
 
@@ -244,5 +277,28 @@ mod tests {
         let value = serde_json::to_value(&call).expect("serialize");
         let back: ToolCall = serde_json::from_value(value).expect("deserialize");
         assert_eq!(back, call);
+    }
+}
+
+#[cfg(test)]
+mod server_tool_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn server_tool_is_declared_verbatim() {
+        let tool = Tool::server("deepseek_web_search");
+        assert_eq!(
+            serde_json::to_value(tool).expect("serialize"),
+            json!({"type": "deepseek_web_search"})
+        );
+    }
+
+    #[test]
+    fn function_tool_still_serializes_normally() {
+        let tool = Tool::function("lookup", json!({"type": "object"}), None);
+        let value = serde_json::to_value(tool).expect("serialize");
+        assert_eq!(value["type"], "function");
+        assert_eq!(value["function"]["name"], "lookup");
     }
 }

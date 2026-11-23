@@ -91,7 +91,9 @@ pub fn to_anthropic(
                 .iter()
                 .map(|tool| {
                     let mut native = NativeTool::new(tool.name.clone(), tool.parameters.clone());
-                    native.description = tool.description.clone();
+                    if let Some(description) = &tool.description {
+                        native = native.with_description(description.clone());
+                    }
                     native
                 })
                 .collect(),
@@ -107,14 +109,21 @@ pub fn to_anthropic(
         unsupported(mode, &mut warnings, "Anthropic 扩展必须是 JSON 对象")?;
     }
 
+    // 最新 Messages API 已移除 temperature / top_p / top_k。
+    if request.options.temperature.is_some() || request.options.top_p.is_some() {
+        unsupported(
+            mode,
+            &mut warnings,
+            "Anthropic Messages 已移除 temperature / top_p，请改用 output_config.effort 控制推理",
+        )?;
+    }
+
     let native = MessagesRequest {
         model: request.model.clone(),
         max_tokens: request.options.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         messages,
         system: (!system_parts.is_empty()).then(|| system_parts.join("\n\n")),
-        temperature: request.options.temperature,
-        top_p: request.options.top_p,
-        top_k: None,
+        output_config: None,
         stop_sequences: (!request.options.stop.is_empty()).then(|| request.options.stop.clone()),
         tools,
         tool_choice: None,
@@ -317,5 +326,40 @@ mod tests {
         assert_eq!(unified.tool_calls()[0].name, "lookup");
         assert_eq!(unified.usage.map(|u| u.total_tokens), Some(7));
         assert_eq!(unified.finish_reason.as_deref(), Some("tool_use"));
+    }
+}
+
+#[cfg(test)]
+mod alignment_tests {
+    use super::*;
+    use crate::content::Message;
+
+    fn request() -> GenerateRequest {
+        GenerateRequest::builder()
+            .model("claude-opus-4-6")
+            .user("hi")
+            .max_tokens(128)
+            .build()
+            .expect("request")
+    }
+
+    #[test]
+    fn sampling_parameters_are_strict_error_or_warning() {
+        let mut request = request();
+        request.options.temperature = Some(0.2);
+
+        assert!(to_anthropic(&request, CompatibilityMode::Strict).is_err());
+
+        let adapted = to_anthropic(&request, CompatibilityMode::BestEffort).expect("adapt");
+        assert_eq!(adapted.warnings.len(), 1);
+        assert!(adapted.warnings[0].message.contains("temperature"));
+    }
+
+    #[test]
+    fn system_and_user_messages_still_map() {
+        let mut request = request();
+        request.messages.push(Message::system("be brief"));
+        let adapted = to_anthropic(&request, CompatibilityMode::Strict).expect("adapt");
+        assert_eq!(adapted.native.system.as_deref(), Some("be brief"));
     }
 }

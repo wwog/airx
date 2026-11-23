@@ -49,7 +49,7 @@ fn encode_uses_messages_path_and_anthropic_headers() {
 }
 
 #[test]
-fn decode_keeps_thinking_tool_use_and_unknown_blocks() {
+fn decode_keeps_thinking_tool_use_and_server_tool_blocks() {
     let response: MessagesResponse = endpoint()
         .decode(HttpResponse::new(
             StatusCode::OK,
@@ -69,11 +69,17 @@ fn decode_keeps_thinking_tool_use_and_unknown_blocks() {
     assert!(matches!(response.content[0], ContentBlock::Thinking(_)));
     let calls = response.tool_uses();
     assert_eq!(calls[0].input["q"], "singapore");
-    assert!(matches!(response.content[3], ContentBlock::Other(_)));
+    match &response.content[3] {
+        ContentBlock::ServerToolUse(block) => {
+            assert_eq!(block.id, "srv_1");
+            assert_eq!(block.name, "web_search");
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
 
-    // 未知块在往返中保持原样。
     let value = serde_json::to_value(&response).expect("serialize");
     assert_eq!(value["content"][3]["id"], "srv_1");
+    assert_eq!(value["content"][3]["type"], "server_tool_use");
 }
 
 #[test]

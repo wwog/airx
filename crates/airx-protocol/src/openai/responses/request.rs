@@ -7,7 +7,9 @@ use airx_core::model::ModelId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::openai::chat::{Tool, ToolChoice};
+use super::tool::ResponsesTool;
+use crate::openai::chat::ToolChoice;
+use crate::openai::common::reasoning::ReasoningEffort;
 
 /// Responses 输入：纯文本或 item 列表。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,6 +41,51 @@ pub enum InputItem {
     },
 }
 
+/// 推理配置。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Reasoning {
+    /// 推理投入等级。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 文本输出配置。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TextConfig {
+    /// 输出格式。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<TextFormat>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 文本输出格式。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TextFormat {
+    /// 普通文本。
+    Text,
+    /// JSON 对象模式。
+    JsonObject,
+    /// JSON Schema 结构化输出。
+    JsonSchema {
+        /// 名称。
+        name: String,
+        /// 描述。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        /// JSON Schema。
+        schema: Value,
+        /// 是否严格。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        strict: Option<bool>,
+    },
+}
+
 /// Responses 请求。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResponsesRequest {
@@ -61,13 +108,19 @@ pub struct ResponsesRequest {
     pub top_p: Option<f32>,
     /// 工具。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<Tool>>,
+    pub tools: Option<Vec<ResponsesTool>>,
     /// 工具选择。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
     /// 是否允许并行工具调用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
+    /// 推理配置。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>,
+    /// 文本输出配置。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<TextConfig>,
     /// 是否流式。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
@@ -92,9 +145,11 @@ pub struct ResponsesRequestBuilder {
     max_output_tokens: Option<u32>,
     temperature: Option<f32>,
     top_p: Option<f32>,
-    tools: Option<Vec<Tool>>,
+    tools: Option<Vec<ResponsesTool>>,
     tool_choice: Option<ToolChoice>,
     parallel_tool_calls: Option<bool>,
+    reasoning: Option<Reasoning>,
+    text: Option<TextConfig>,
     stream: Option<bool>,
     extensions: Extensions,
 }
@@ -149,9 +204,9 @@ impl ResponsesRequestBuilder {
         self
     }
 
-    /// 设置工具。
+    /// 设置工具（函数工具或服务端联网工具）。
     #[must_use]
-    pub fn tools(mut self, tools: impl IntoIterator<Item = Tool>) -> Self {
+    pub fn tools(mut self, tools: impl IntoIterator<Item = ResponsesTool>) -> Self {
         self.tools = Some(tools.into_iter().collect());
         self
     }
@@ -167,6 +222,20 @@ impl ResponsesRequestBuilder {
     #[must_use]
     pub fn parallel_tool_calls(mut self, allowed: bool) -> Self {
         self.parallel_tool_calls = Some(allowed);
+        self
+    }
+
+    /// 设置推理投入等级。
+    #[must_use]
+    pub fn reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning.get_or_insert_with(Reasoning::default).effort = Some(effort);
+        self
+    }
+
+    /// 设置文本输出格式。
+    #[must_use]
+    pub fn text_format(mut self, format: TextFormat) -> Self {
+        self.text.get_or_insert_with(TextConfig::default).format = Some(format);
         self
     }
 
@@ -200,8 +269,38 @@ impl ResponsesRequestBuilder {
             tools: self.tools,
             tool_choice: self.tool_choice,
             parallel_tool_calls: self.parallel_tool_calls,
+            reasoning: self.reasoning,
+            text: self.text,
             stream: self.stream,
             extensions: self.extensions,
         })
+    }
+}
+
+#[cfg(test)]
+mod alignment_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reasoning_and_text_format_serialize() {
+        let request = ResponsesRequest::builder()
+            .model("gpt-5")
+            .input("hi")
+            .reasoning_effort(ReasoningEffort::Medium)
+            .text_format(TextFormat::JsonSchema {
+                name: "poster".to_owned(),
+                description: None,
+                schema: json!({"type": "object"}),
+                strict: Some(true),
+            })
+            .build()
+            .expect("request");
+
+        let value = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(value["reasoning"]["effort"], "medium");
+        assert_eq!(value["text"]["format"]["type"], "json_schema");
+        assert_eq!(value["text"]["format"]["name"], "poster");
+        assert_eq!(value["text"]["format"]["strict"], true);
     }
 }

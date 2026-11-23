@@ -60,6 +60,12 @@ pub struct ChunkDelta {
     /// 推理增量（DeepSeek / 部分兼容网关）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// 服务端联网工具产生的引用（DeepSeek 在最终 chunk 一次性返回）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Vec<Value>>,
+    /// 服务端工具调用记录（DeepSeek 在最终 chunk 一次性返回）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_tool_calls: Option<Vec<Value>>,
     /// 工具调用增量。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ChunkToolCall>>,

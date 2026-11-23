@@ -6,6 +6,7 @@ use airx_core::AirxError;
 use airx_core::error::StreamError;
 use airx_core::json::Extensions;
 use airx_core::stream::StreamStatus;
+use serde_json::Value;
 
 use super::event::ResponsesEvent;
 use super::response::{
@@ -49,6 +50,9 @@ impl ItemState {
                 name: call.name,
                 arguments: call.arguments,
             },
+            OutputItem::WebSearchCall(call) => Self::Other(
+                serde_json::to_value(OutputItem::WebSearchCall(call)).unwrap_or(Value::Null),
+            ),
             OutputItem::Other(value) => Self::Other(value),
         }
     }

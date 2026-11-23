@@ -15,10 +15,11 @@ pub use event::{
     Ping, SignatureDelta, TextDelta, ThinkingDelta,
 };
 pub use message::{
-    ContentBlock, ImageBlock, MessageContent, RedactedThinkingBlock, Role, TextBlock,
-    ThinkingBlock, ToolResultBlock, ToolUseBlock,
+    ContentBlock, ImageBlock, MessageContent, RedactedThinkingBlock, Role, ServerToolUseBlock,
+    TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock, WebSearchToolResultBlock,
 };
 pub use request::{
-    Message, MessagesRequest, MessagesRequestBuilder, ThinkingConfig, Tool, ToolChoice,
+    ClientTool, JsonOutputFormat, Message, MessagesRequest, MessagesRequestBuilder, OutputConfig,
+    OutputEffort, ThinkingConfig, ThinkingDisplay, Tool, ToolChoice, WebSearchKind, WebSearchTool,
 };
 pub use response::MessagesResponse;

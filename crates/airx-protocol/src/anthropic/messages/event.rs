@@ -1,7 +1,7 @@
 //! Anthropic Messages 流式事件。
 
 use airx_core::json::Extensions;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::anthropic::common::Usage;
@@ -10,8 +10,7 @@ use super::message::ContentBlock;
 use super::response::MessagesResponse;
 
 /// Messages 流事件。
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MessagesEvent {
     /// `message_start`
     MessageStart(MessageStart),
@@ -35,18 +34,21 @@ pub enum MessagesEvent {
 
 impl<'de> Deserialize<'de> for MessagesEvent {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = Value::deserialize(deserializer)?;
+        let mut value = Value::deserialize(deserializer)?;
         let kind = value
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
 
         macro_rules! parse {
-            ($ty:ty, $variant:ident) => {
+            ($ty:ty, $variant:ident) => {{
+                if let Value::Object(map) = &mut value {
+                    map.remove("type");
+                }
                 return serde_json::from_value::<$ty>(value)
                     .map(Self::$variant)
-                    .map_err(serde::de::Error::custom)
-            };
+                    .map_err(serde::de::Error::custom);
+            }};
         }
 
         match kind {
@@ -65,7 +67,6 @@ impl<'de> Deserialize<'de> for MessagesEvent {
 
 /// `message_start`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "message_start")]
 pub struct MessageStart {
     /// 初始消息。
     pub message: MessagesResponse,
@@ -76,7 +77,6 @@ pub struct MessageStart {
 
 /// `content_block_start`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "content_block_start")]
 pub struct ContentBlockStart {
     /// 块序号。
     pub index: u32,
@@ -89,7 +89,6 @@ pub struct ContentBlockStart {
 
 /// `content_block_delta`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "content_block_delta")]
 pub struct ContentBlockDelta {
     /// 块序号。
     pub index: u32,
@@ -150,7 +149,6 @@ pub struct SignatureDelta {
 
 /// `content_block_stop`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "content_block_stop")]
 pub struct ContentBlockStop {
     /// 块序号。
     pub index: u32,
@@ -161,7 +159,6 @@ pub struct ContentBlockStop {
 
 /// `message_delta`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "message_delta")]
 pub struct MessageDeltaEvent {
     /// 增量。
     pub delta: MessageDelta,
@@ -186,7 +183,6 @@ pub struct MessageDelta {
 
 /// `message_stop`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "message_stop")]
 pub struct MessageStop {
     /// 未识别的扩展字段。
     #[serde(flatten)]
@@ -195,7 +191,6 @@ pub struct MessageStop {
 
 /// `ping`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "ping")]
 pub struct Ping {
     /// 未识别的扩展字段。
     #[serde(flatten)]
@@ -204,7 +199,6 @@ pub struct Ping {
 
 /// `error`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename = "error")]
 pub struct ErrorEvent {
     /// 错误主体。
     pub error: ErrorBody,
@@ -221,6 +215,27 @@ pub struct ErrorBody {
     pub kind: Option<String>,
     /// 错误描述。
     pub message: String,
+}
+
+impl Serialize for MessagesEvent {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let (kind, value) = match self {
+            Self::MessageStart(event) => ("message_start", serde_json::to_value(event)),
+            Self::ContentBlockStart(event) => ("content_block_start", serde_json::to_value(event)),
+            Self::ContentBlockDelta(event) => ("content_block_delta", serde_json::to_value(event)),
+            Self::ContentBlockStop(event) => ("content_block_stop", serde_json::to_value(event)),
+            Self::MessageDelta(event) => ("message_delta", serde_json::to_value(event)),
+            Self::MessageStop(event) => ("message_stop", serde_json::to_value(event)),
+            Self::Ping(event) => ("ping", serde_json::to_value(event)),
+            Self::Error(event) => ("error", serde_json::to_value(event)),
+            Self::Unknown(value) => return value.serialize(serializer),
+        };
+        let mut value = value.map_err(serde::ser::Error::custom)?;
+        if let Value::Object(map) = &mut value {
+            map.insert("type".to_owned(), Value::String(kind.to_owned()));
+        }
+        value.serialize(serializer)
+    }
 }
 
 #[cfg(test)]

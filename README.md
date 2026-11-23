@@ -103,7 +103,7 @@ OPENAI_API_KEY=sk-... cargo run -p airx --example chat_stream
 OPENAI_API_KEY=sk-... cargo run -p airx --example unified
 ```
 
-OpenAI-Compatible 网关示例（OpenCode Zen，两个模型 `hy4-flash-free` / `deepseek-v4.1-flash`）：
+OpenAI-Compatible 网关示例（OpenCode Zen，两个模型 `hy4-flash-free`）：
 
 ```bash
 cp .env.example .env      # 填入 OPENCODE_API_KEY；.env 已被 git 忽略
@@ -132,6 +132,12 @@ cargo run -p airx --features unified --example opencode_full
 - 中间件是同步的；需要异步（如 Token 刷新）时请实现自定义 `Transport`。
 - 流式请求不重试（已消费事件无法重放）；首次事件前重试留待后续。
 - WASM 传输已通过 `wasm32-unknown-unknown` 编译检查，浏览器运行时行为尚未纳入 CI。
+- Provider 参数随模型演进：Anthropic 已移除 `temperature` / `top_p` / `top_k`，
+  OpenAI `max_tokens` 已弃用，DeepSeek 不支持 `json_schema`。对齐基准与来源见
+  [docs/protocol-support.md](docs/protocol-support.md) 与 [docs/compatibility.md](docs/compatibility.md)。
+- 服务端联网工具（OpenAI `web_search`、Anthropic `web_search` / `web_fetch`、DeepSeek
+  `deepseek_web_search`）由 Provider 后台执行；airx 只声明工具并解析引用/调用记录，
+  不代发本地网络请求。
 
 ## 开发
 

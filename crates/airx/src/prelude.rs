@@ -22,8 +22,8 @@
 pub use airx_core::{AirxError, ApiVersion, ModelId, ProviderId};
 #[cfg(feature = "anthropic")]
 pub use airx_protocol::anthropic::messages::{
-    MessagesEvent, MessagesRequest, MessagesResponse, MessagesStreamAccumulator, Role,
-    ThinkingConfig,
+    JsonOutputFormat, MessagesEvent, MessagesRequest, MessagesResponse, MessagesStreamAccumulator,
+    OutputConfig, OutputEffort, Role, ThinkingConfig, ThinkingDisplay,
 };
 #[cfg(feature = "deepseek")]
 pub use airx_protocol::deepseek::{CompatibilityMode, DeepSeekPolicy};
@@ -35,8 +35,10 @@ pub use airx_protocol::openai::chat::{
     ToolChoice,
 };
 #[cfg(feature = "openai")]
+pub use airx_protocol::openai::common::{ReasoningEffort, Verbosity};
+#[cfg(feature = "openai")]
 pub use airx_protocol::openai::responses::{
-    ResponsesEvent, ResponsesRequest, ResponsesResponse, ResponsesStreamAccumulator,
+    ResponsesEvent, ResponsesRequest, ResponsesResponse, ResponsesStreamAccumulator, TextFormat,
 };
 pub use airx_transport::RetryPolicy;
 #[cfg(feature = "unified")]

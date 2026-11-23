@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .model(model.clone())
             .system("你是图形生成器，只输出可解析的 SVG 源码。")
             .user(common::POSTER_PROMPT)
-            .max_tokens(2048)
+            .max_completion_tokens(2048)
             .build()?;
 
         let response = client.openai()?.chat().create(request).await?;

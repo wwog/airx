@@ -5,6 +5,7 @@ mod endpoint;
 mod event;
 mod request;
 mod response;
+mod tool;
 
 pub use accumulator::ResponsesStreamAccumulator;
 pub use endpoint::{RESPONSES_PATH, ResponsesEndpoint};
@@ -13,8 +14,12 @@ pub use event::{
     IncompleteEvent, OutputItemAdded, OutputItemDone, OutputTextDelta, OutputTextDone,
     ResponsesEvent,
 };
-pub use request::{InputItem, ResponsesInput, ResponsesRequest, ResponsesRequestBuilder};
-pub use response::{
-    FunctionCallItem, MessageItem, OutputContent, OutputItem, OutputText, RefusalContent,
-    ResponsesResponse, ResponsesUsage,
+pub use request::{
+    InputItem, Reasoning, ResponsesInput, ResponsesRequest, ResponsesRequestBuilder, TextConfig,
+    TextFormat,
 };
+pub use response::{
+    Annotation, FunctionCallItem, MessageItem, OutputContent, OutputItem, OutputText,
+    RefusalContent, ResponsesResponse, ResponsesUsage, UrlCitation, WebSearchCallItem,
+};
+pub use tool::{ResponsesTool, SearchContextSize, WebSearchFilters, WebSearchKind, WebSearchTool};

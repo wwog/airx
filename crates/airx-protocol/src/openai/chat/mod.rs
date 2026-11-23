@@ -17,6 +17,6 @@ pub use message::{ChatMessage, ContentPart, ImageUrl, ResponseMessage, UserConte
 pub use request::{ChatCompletionRequest, ChatCompletionRequestBuilder, StreamOptions};
 pub use response::{ChatChoice, ChatCompletionResponse};
 pub use tool::{
-    FunctionCall, FunctionDefinition, JsonSchemaSpec, ResponseFormat, Tool, ToolCall, ToolChoice,
-    ToolChoiceFunction, ToolChoiceFunctionName, ToolChoiceMode,
+    FunctionCall, FunctionDefinition, FunctionTool, JsonSchemaSpec, ResponseFormat, Tool, ToolCall,
+    ToolChoice, ToolChoiceFunction, ToolChoiceFunctionName, ToolChoiceMode,
 };
