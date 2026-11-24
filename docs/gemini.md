@@ -282,6 +282,10 @@ let summary: Summary = gemini
 被拦截或空内容返回 `AirxError::Deserialization`。需要 `responseJsonSchema` 时直接写
 `GenerationConfig { response_mime_type: Some("application/json".into()), response_json_schema: Some(schema), ..Default::default() }`。
 
+schema 本身是请求参数（`generationConfig.responseMimeType` + `responseSchema` / `responseJsonSchema`），
+`:streamGenerateContent` 同样适用；流式片段是部分 JSON 字符串，必须累积后再解析。注意
+`minLength`、`maxLength`、`uniqueItems` 等约束在受限解码时服务端并不强制，客户端仍需自行校验。
+
 ## 5. 响应与流式
 
 ### 5.1 三种取值方式
@@ -335,6 +339,8 @@ let response = with_meta.data;
 `GenerateContentStreamAccumulator`：`new()` → `apply(response)` → `finish()`；
 `snapshot()` 可取部分结果且不要求完成，`status()` 返回 `airx-core` 的 `StreamStatus`。
 文本按 thought 标记分段拼接，`functionCall` 原样追加；终态后只吸收 usage 与扩展字段。
+
+结构化输出的流式取值方式与普通文本相同（`final_text()` + serde），不要逐片段反序列化。
 
 ## 6. 计 token、模型列表与 Embeddings
 

@@ -198,4 +198,9 @@ while let Some(event) = stream.try_next().await? { /* ... */ }
 - 完整历史输入：Chat / Messages 的 `.messages(...)`、Gemini `.contents(...)`、
   Responses `.input_items(...)`。
 - raw execute：`OpenAi/Anthropic/Gemini::execute(HttpRequest)` 复用认证、重试、超时与压缩。
-- `parse_as<T>` 只负责 serde 解析；schema 仍由调用方通过各协议字段设置。
+- 结构化输出是请求参数（`response_format` / `text.format` / `output_config.format` /
+  `responseSchema`），不是 feature；可与各协议的流式入口组合，流式需先累积完整文本再
+  反序列化，没有增量类型化解析。
+- `parse_as<T>` 只负责 serde 解析，且仅支持非流式请求；schema 仍由调用方通过各协议字段
+  设置。流式要么用 `final_text()` / `final_response()` 收尾后 `serde_json::from_str`，
+  要么自行累积 text delta 再解析。

@@ -13,7 +13,6 @@ workspace = true
 # 占位 feature：当前不裁剪模块，保留以稳定 feature 组合（见 docs/architecture.md §8.3）
 default = []
 stream = []
-json = []
 tracing = ["dep:tracing"]
 
 [dependencies]

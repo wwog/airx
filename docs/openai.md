@@ -240,6 +240,27 @@ let parsed: MyPoster = client.chat().parse_as(request).await?;
 `response_format`；空内容返回 `AirxError::Deserialization`。响应侧 `first_content()`
 返回首个候选文本，`ResponseMessage` 保留 `refusal`、`tool_calls`、`annotations` 等字段。
 
+结构化输出由 `response_format` 这个**请求参数**控制，不是 Cargo feature，因此也可以与
+`stream()` 组合。流式下 JSON 文本按普通 text delta 到达，单个片段通常不完整，必须在流
+结束后再整体反序列化——`parse_as` 只适用于非流式请求：
+
+```rust
+use airx_protocol::openai::chat::ResponseFormat;
+
+let request = ChatCompletionRequest::builder()
+    .model("gpt-4o-mini")
+    .response_format(ResponseFormat::JsonObject) // 需要强 schema 约束时改用 JsonSchema
+    .user("只输出 JSON。")
+    .build()?;
+
+let text = client.chat().stream(request).await?.final_text().await?;
+let parsed = serde_json::from_str::<MyPoster>(&text)
+    .map_err(|error| AirxError::Deserialization(error.into()))?;
+```
+
+`final_text()` 会消费整条流并驱动聚合器；需要边流边展示时，自行累积 `delta.content`，
+最后再对累积结果做一次 serde 解析。
+
 ## 5. Responses
 
 ### 5.1 请求构建
@@ -269,7 +290,9 @@ println!("{}", response.output_text());
 | `.stream(bool)` / `.extension(key, value)` | `stream` / 顶层字段 | 流式标记、未建模参数 |
 
 `TextFormat::JsonSchema { name, description, schema, strict }` 用于结构化输出；
-`parse_as::<T>` 读取 `output_text()` 后做 serde 解析。
+`parse_as::<T>` 读取 `output_text()` 后做 serde 解析。`text.format` 同样是请求参数而非
+feature，可与 `responses().stream(request)` 组合；流式下需用 `final_text()`（或
+`final_response()`）累积完整文本后自行 serde 反序列化，`parse_as` 仅支持非流式请求。
 
 ### 5.2 输入 item 与输出 item
 
@@ -359,7 +382,9 @@ while let Some(event) = stream.try_next().await? {
 ```
 
 一次性收尾会消费整个流：`final_response()` 返回完整响应，`final_text()` 返回文本；
-Chat 与 Responses 的 `ProtocolStream` 都提供这两个方法。
+Chat 与 Responses 的 `ProtocolStream` 都提供这两个方法。结构化输出也能搭同一条流：
+`response_format` / `text.format` 只是请求字段，用 `final_text()` 拿到完整 JSON 文本后
+`serde_json::from_str` 即可得到 `T`。
 
 ### 6.3 Accumulator 与完成语义
 

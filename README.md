@@ -142,6 +142,10 @@ let tokens = anthropic
     .await?;
 ```
 
+结构化输出由请求参数控制（`response_format` / `text.format` / `output_config.format` /
+`responseSchema`），不是 feature。`parse_as` 只用于非流式；流式时先用 `final_text()`
+收齐文本，再自行 `serde_json::from_str`。
+
 默认策略对齐官方 SDK：native 2 次重试、10 秒连接超时、gzip / brotli / deflate 解压、
 `User-Agent: airx/<version>`；整体请求超时默认关闭，避免截断长流。
 `RequestOptions` 可临时覆盖 Header、幂等键、超时与重试策略；Provider 客户端提供
@@ -191,7 +195,6 @@ Anthropic 提供 Files / Batches；Gemini 提供 Embeddings（文件/批处理�
 | `anthropic` | Anthropic Messages | ✅（经 `all-providers`） |
 | `gemini` | Gemini `generateContent` + `streamGenerateContent` | ✅（经 `all-providers`） |
 | `stream` | 流式 API：`ProtocolStream`、各协议事件、Accumulator | ✅ |
-| `json` | 预留的 JSON 工具开关（`JsonMode` / `RawJson` 当前始终可用） | — |
 
 按需裁剪（只保留 OpenAI + 流式）：
 

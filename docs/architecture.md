@@ -467,7 +467,8 @@ Provider 配置的 `Debug` 会隐藏 API Key。
 | 单次请求选项 | `with_options(RequestOptions)`；Header、`Idempotency-Key`、timeout、retry override | `airx/src/options.rs` |
 | `futures::Stream` | `ProtocolStream` 实现 `futures_core::Stream`，支持 `TryStreamExt` / `select!` | `airx/src/stream.rs` |
 | 流式收尾 | 各协议 `final_response()` / `final_text()`，内部驱动对应 Accumulator | 同上 |
-| 结构化输出 | `parse_as::<T>()`（Chat / Responses / Messages / Gemini），只做 serde 解析 | 各 Provider 客户端 |
+| 结构化输出（非流式） | `parse_as::<T>()`（Chat / Responses / Messages / Gemini），只做 serde 解析 | 各 Provider 客户端 |
+| 结构化输出（流式） | `final_response()` / `final_text()` 累积完整文本后自行 `serde_json::from_str`；无增量类型化 API | 同上 |
 | 模型列表 | `client.models().list() / retrieve()`；Anthropic / Gemini 支持 `list_all()` 翻页 | 各 Provider 客户端 |
 | 计 token | Anthropic `messages().count_tokens()`；Gemini `generate_content(m).count_tokens()` | 同上 |
 | 文件 / 批处理 / Embeddings | OpenAI `files/batches/embeddings`、Anthropic `files/batches`、Gemini `embed_content` | 各 Provider 客户端 |
@@ -491,7 +492,10 @@ Provider 配置的 `Debug` 会隐藏 API Key。
 | `openai` / `anthropic` / `gemini` | 启用对应协议模块 |
 | `all-providers` | 三者全开 |
 | `stream` | 门面流式 API（`ProtocolStream`、`stream()` 方法） |
-| `json` | 预留开关（`JsonMode` / `RawJson` 当前始终可用） |
+
+结构化输出不是 feature，而是请求参数（`response_format` / `text.format` /
+`output_config.format` / `responseSchema`），其可用性由模型与网关决定；详见
+[protocol-support.md](protocol-support.md#结构化输出与流式)。
 
 按需裁剪示例：
 
@@ -507,16 +511,20 @@ airx = { version = "0.1", default-features = false, features = ["native", "rustl
 
 ### 8.3 占位 feature
 
-`airx-core` 的 `stream` / `json`、`airx-protocol` 的 `stream`、
-`airx-transport` 的 `stream` 目前是空 feature：
+`airx-core` 的 `stream`、`airx-protocol` 的 `stream`、`airx-transport` 的 `stream`
+目前是空 feature：
 
 ```toml
 stream = []
-json = []
 ```
 
 它们不会裁剪模块；流式与 JSON 工具在对应 crate 中始终编译。真正控制门面流式 API 的
-是 `airx` 的 `stream` feature。
+是 `airx` 的 `stream` feature。`airx-core` 的 `json` 模块（`JsonMode` / `RawJson`）
+同样不受 feature 控制，始终可用。
+
+历史上 `airx-core` / `airx` 曾声明过 `json` 空 feature，现已移除：它不是结构化输出开关，
+`JsonMode` / `RawJson` 直接使用即可；结构化输出由各协议的请求参数控制（见
+[protocol-support.md](protocol-support.md#结构化输出与流式)）。
 
 ### 8.4 平台约束
 

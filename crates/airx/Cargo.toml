@@ -29,7 +29,6 @@ all-providers = ["openai", "anthropic", "gemini"]
 
 # 能力
 stream = ["airx-core/stream", "airx-protocol/stream", "airx-transport/stream"]
-json = ["airx-core/json"]
 
 [dependencies]
 airx-core = { path = "../airx-core", default-features = false }

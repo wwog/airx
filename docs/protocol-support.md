@@ -109,6 +109,43 @@ Gemini 流没有 `[DONE]` 哨兵。`finish()` 只有在收到候选的 `finishRe
 上传使用 `multipart/form-data`；未知字段通过 `extensions` 保留。Gemini Files / Batches
 尚未封装，可用 `execute(HttpRequest)` 或原生 `Endpoint` 扩展。
 
+## 结构化输出与流式
+
+结构化输出**不是 feature，也不裁剪代码**：它完全由请求参数控制，可用性由模型与网关决定。
+
+| 协议 | 请求参数 | 非流式取值 | 流式 |
+| --- | --- | --- | --- |
+| OpenAI Chat | `response_format`（`text` / `json_object` / `json_schema`） | `parse_as::<T>()` | 支持；JSON 文本随 delta 到达 |
+| OpenAI Responses | `text.format`（`text` / `json_object` / `json_schema`） | `parse_as::<T>()` → `output_text()` | 支持；`response.output_text.delta` |
+| Anthropic Messages | `output_config.format`（`json_schema`） | `parse_as::<T>()` | 支持；需累积完整文本后反序列化 |
+| Gemini generateContent | `responseMimeType=application/json` + `responseSchema` / `responseJsonSchema` | `parse_as::<T>()` | 支持；每个增量是部分文本 |
+
+airx 不在客户端拦截 `stream` 与结构化输出参数的组合；Provider 不接受该组合时按普通
+`ProviderError` 返回。
+
+流式下**没有增量类型化 API**：JSON 片段在任何时刻都可能不完整，必须累积到流结束后再解析。
+
+```rust
+let request = ChatCompletionRequest::builder()
+    .model("gpt-4o-mini")
+    .user("生成一张海报的描述。")
+    .response_format(ResponseFormat::JsonObject) // 或 JsonSchema
+    .build()?;
+
+let text = client.chat().stream(request).await?.final_text().await?;
+let parsed = serde_json::from_str::<MyPoster>(&text)
+    .map_err(|error| AirxError::Deserialization(error.into()))?;
+```
+
+`final_text()` / `final_response()` 内部驱动各协议的 Accumulator，只在协议完成信号到达时
+返回成功（Chat `[DONE]`、Responses `response.completed`、Messages `message_stop`、
+Gemini `finishReason`）；截断或 EOF 提前返回 `AirxError::Stream(Incomplete)`。
+需要边收边展示时，自行累积文本 delta，或用 `airx_core::stream::JsonAccumulator`
+判断结构是否闭合（它只做完整性判断，不做部分反序列化）。
+
+`parse_as::<T>()` 只用于非流式：它把完整响应文本交给 serde，不设置参数、不校验 schema、
+不重试。
+
 ## 模型列表
 
 | Provider | 端点 | 分页 |

@@ -186,6 +186,11 @@ let request = MessagesRequest::builder()
     .build()?;
 ```
 
+结构化输出是请求参数 `output_config.format`，可以与流式入口 `messages().stream()` 组合
+（流式取值见 5.2）。官方限制：它与 citations、assistant 预填充不兼容；切换
+`output_config.format` 会使 prompt cache 失效，并额外注入一段 system prompt，增加输入 token。
+airx 不拦截 `stream` 与该参数的组合，被网关或模型拒绝时按普通 `ProviderError` 返回。
+
 ### 4.2 thinking 的四种形态
 
 | 形态 | 构造 | 序列化要点 |
@@ -275,6 +280,9 @@ schema 仍要通过 `output_format(JsonOutputFormat::new(schema))` 交给模型�
   `TryStreamExt`、`tokio::select!`；inherent `async fn next()` 的 `Ok(None)` 表示正常结束；
 - `meta()` / `request_id()` 暴露建连元数据；`final_text()` / `final_response()` 内部驱动
   `MessagesStreamAccumulator` 一次性收尾。
+
+流式结构化输出需要先累积完整文本（`final_text()`，或自行累积 `text_delta`）再
+`serde_json::from_str`；`parse_as` 只用于非流式请求。
 
 ```rust,ignore
 use futures_util::TryStreamExt;
