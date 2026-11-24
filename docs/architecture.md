@@ -466,12 +466,12 @@ Provider 配置的 `Debug` 会隐藏 API Key。
 | 流式元数据 | `ProtocolStream::meta()` / `request_id()` | 同上 |
 | 单次请求选项 | `with_options(RequestOptions)`；Header、`Idempotency-Key`、timeout、retry override | `airx/src/options.rs` |
 | `futures::Stream` | `ProtocolStream` 实现 `futures_core::Stream`，支持 `TryStreamExt` / `select!` | `airx/src/stream.rs` |
-| 流式收尾 | 各协议 `final_response()` / `final_text()`，内部驱动对应 Accumulator | 同上 |
+| 流式收尾 | 各协议 `final_response()` / `final_text()`，内部驱动对应 Accumulator；流内失败可取部分结果 | 同上 |
 | 结构化输出（非流式） | `parse_as::<T>()`（Chat / Responses / Messages / Gemini），只做 serde 解析 | 各 Provider 客户端 |
-| 结构化输出（流式） | `final_response()` / `final_text()` 累积完整文本后自行 `serde_json::from_str`；无增量类型化 API | 同上 |
-| 模型列表 | `client.models().list() / retrieve()`；Anthropic / Gemini 支持 `list_all()` 翻页 | 各 Provider 客户端 |
-| 计 token | Anthropic `messages().count_tokens()`；Gemini `generate_content(m).count_tokens()` | 同上 |
-| 文件 / 批处理 / Embeddings | OpenAI `files/batches/embeddings`、Anthropic `files/batches`、Gemini `embed_content` | 各 Provider 客户端 |
+| 结构化输出（流式） | `final_parsed::<T>()`（等价于 `final_text()` + serde）；无增量类型化 API | 同上 |
+| 模型列表 | OpenAI `list/retrieve/delete`；Anthropic `list/retrieve`；Gemini `list/get`；Anthropic / Gemini 支持 `list_all()` 翻页 | 各 Provider 客户端 |
+| 计 token | Anthropic `messages().count_tokens()`；Gemini `count_tokens()` / `compute_tokens()` | 同上 |
+| 文件 / 批处理 / Embeddings / 缓存 | OpenAI `files/batches/embeddings/moderations`、Anthropic `files/batches`、Gemini `embed_content` / `caches` | 各 Provider 客户端 |
 | 完整历史输入 | Chat `.messages(...)`、Messages `.messages(...)`、Gemini `.contents(...)`、Responses `.input_items(...)` | 各请求构建器 |
 | raw execute | `OpenAi/Anthropic/Gemini::execute(HttpRequest)` | 各 Provider 客户端 |
 
@@ -585,9 +585,10 @@ cargo check -p airx --target wasm32-unknown-unknown \
 - 流式请求不重试；首个事件前重试尚未实现。
 - WASM 不支持自动重试（默认关闭）；native 默认 2 次。
 - WASM 传输只做编译检查，浏览器运行时未纳入 CI。
-- Gemini 已封装 `generateContent` / `streamGenerateContent` / `countTokens` / 模型列表 /
-  Embeddings；Vertex AI、Live API、Files、Batches 未封装。
-- 已封装 OpenAI Files / Batches / Embeddings、Anthropic Files / Batches。
+- Gemini 已封装 `generateContent` / `streamGenerateContent` / `countTokens` /
+  `computeTokens` / 模型列表 / Embeddings / `cachedContents` CRUD；Interactions、Live API、
+  Files、Batches、Vertex AI 专属参数未封装。
+- 已封装 OpenAI Files / Batches / Embeddings / Moderations、Anthropic Files / Batches。
   图片/音频、Vector Store、Fine-tuning、Assistants/Threads 仍不做。
 - 服务端联网工具由 Provider 后台执行；airx 只声明工具并解析引用 / 调用记录，
   不发起本地网络请求。

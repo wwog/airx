@@ -10,11 +10,13 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use airx_core::AirxError;
-use airx_core::stream::SseDecoder;
+use airx_core::error::StreamError;
+use airx_core::stream::{SseDecoder, StreamStatus};
 use airx_protocol::StreamingEndpoint;
 use airx_transport::ByteStream;
 use futures_core::Stream;
 use futures_util::StreamExt;
+use serde::de::DeserializeOwned;
 
 use crate::response::StreamMeta;
 
@@ -142,6 +144,41 @@ impl ProtocolStream<airx_protocol::openai::chat::ChatEndpoint> {
         let response = self.final_response().await?;
         Ok(response.first_content().unwrap_or_default().to_owned())
     }
+
+    /// 消费整个流，把聚合文本按 JSON 解析为 `T`。
+    ///
+    /// 只做 serde 解析，不注入/校验 schema。
+    pub async fn final_parsed<T: DeserializeOwned>(self) -> Result<T, AirxError> {
+        parse_stream_json(self.final_text().await?)
+    }
+
+    /// 消费整个流；流内错误 / 截断时保留已累积的部分响应。
+    pub async fn final_response_partial(
+        mut self,
+    ) -> (
+        airx_protocol::openai::chat::ChatCompletionResponse,
+        Option<AirxError>,
+    ) {
+        let mut accumulator = airx_protocol::openai::chat::ChatStreamAccumulator::new();
+        let mut failure = None;
+        loop {
+            match self.next().await {
+                Ok(Some(event)) => {
+                    if let Err(error) = accumulator.apply(event) {
+                        failure = Some(error);
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        let (response, status) = accumulator.finish_partial();
+        (response, finish_partial_failure(status, failure))
+    }
 }
 
 #[cfg(feature = "openai")]
@@ -160,6 +197,41 @@ impl ProtocolStream<airx_protocol::openai::responses::ResponsesEndpoint> {
     /// 消费整个流并返回文本。
     pub async fn final_text(self) -> Result<String, AirxError> {
         Ok(self.final_response().await?.output_text())
+    }
+
+    /// 消费整个流，把聚合文本按 JSON 解析为 `T`。
+    ///
+    /// 只做 serde 解析，不注入/校验 schema。
+    pub async fn final_parsed<T: DeserializeOwned>(self) -> Result<T, AirxError> {
+        parse_stream_json(self.final_text().await?)
+    }
+
+    /// 消费整个流；流内错误 / 截断时保留已累积的部分响应。
+    pub async fn final_response_partial(
+        mut self,
+    ) -> (
+        airx_protocol::openai::responses::ResponsesResponse,
+        Option<AirxError>,
+    ) {
+        let mut accumulator = airx_protocol::openai::responses::ResponsesStreamAccumulator::new();
+        let mut failure = None;
+        loop {
+            match self.next().await {
+                Ok(Some(event)) => {
+                    if let Err(error) = accumulator.apply(event) {
+                        failure = Some(error);
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        let (response, status) = accumulator.finish_partial();
+        (response, finish_partial_failure(status, failure))
     }
 }
 
@@ -180,6 +252,13 @@ impl ProtocolStream<airx_protocol::anthropic::messages::MessagesEndpoint> {
     pub async fn final_text(self) -> Result<String, AirxError> {
         Ok(self.final_response().await?.text())
     }
+
+    /// 消费整个流，把聚合文本按 JSON 解析为 `T`。
+    ///
+    /// 只做 serde 解析，不注入/校验 schema。
+    pub async fn final_parsed<T: DeserializeOwned>(self) -> Result<T, AirxError> {
+        parse_stream_json(self.final_text().await?)
+    }
 }
 
 #[cfg(feature = "gemini")]
@@ -199,6 +278,60 @@ impl ProtocolStream<airx_protocol::gemini::generate_content::GenerateContentEndp
     /// 消费整个流并返回文本。
     pub async fn final_text(self) -> Result<String, AirxError> {
         Ok(self.final_response().await?.text())
+    }
+
+    /// 消费整个流，把聚合文本按 JSON 解析为 `T`。
+    ///
+    /// 只做 serde 解析，不注入/校验 schema。
+    pub async fn final_parsed<T: DeserializeOwned>(self) -> Result<T, AirxError> {
+        parse_stream_json(self.final_text().await?)
+    }
+
+    /// 消费整个流；流内错误 / 截断时保留已累积的部分响应。
+    pub async fn final_response_partial(
+        mut self,
+    ) -> (
+        airx_protocol::gemini::generate_content::GenerateContentResponse,
+        Option<AirxError>,
+    ) {
+        let mut accumulator =
+            airx_protocol::gemini::generate_content::GenerateContentStreamAccumulator::new();
+        let mut failure = None;
+        loop {
+            match self.next().await {
+                Ok(Some(event)) => {
+                    if let Err(error) = accumulator.apply(event) {
+                        failure = Some(error);
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        let (response, status) = accumulator.finish_partial();
+        (response, finish_partial_failure(status, failure))
+    }
+}
+
+fn parse_stream_json<T: DeserializeOwned>(text: String) -> Result<T, AirxError> {
+    serde_json::from_str(&text).map_err(|error| AirxError::Deserialization(error.into()))
+}
+
+/// 部分结果收尾的错误归类：只有 `Completed` 才算正常结束。
+fn finish_partial_failure(status: StreamStatus, failure: Option<AirxError>) -> Option<AirxError> {
+    if failure.is_some() {
+        return failure;
+    }
+    match status {
+        StreamStatus::Completed => None,
+        StreamStatus::Failed => Some(AirxError::Stream(StreamError::failed("流内错误"))),
+        _ => Some(AirxError::Stream(StreamError::incomplete(
+            "流在完成信号前结束，结果可能不完整",
+        ))),
     }
 }
 

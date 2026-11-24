@@ -16,7 +16,7 @@ use super::chunk::{ChatCompletionChunk, ChunkChoice};
 use super::event::ChatStreamEvent;
 use super::message::ResponseMessage;
 use super::response::{ChatChoice, ChatCompletionResponse};
-use super::tool::{FunctionCall, ToolCall};
+use super::tool::{CustomToolCall, FunctionCall, ToolCall};
 
 #[derive(Debug, Default)]
 struct ToolCallState {
@@ -24,6 +24,9 @@ struct ToolCallState {
     kind: Option<String>,
     name: Option<String>,
     arguments: String,
+    custom_name: Option<String>,
+    custom_input: String,
+    custom_extensions: Extensions,
     extensions: Extensions,
 }
 
@@ -36,6 +39,7 @@ struct ChoiceState {
     annotations: Option<Vec<serde_json::Value>>,
     server_tool_calls: Option<Vec<serde_json::Value>>,
     refusal: Option<String>,
+    function_call: Option<super::chunk::ChunkFunctionCall>,
     tool_calls: BTreeMap<u32, ToolCallState>,
     finish_reason: Option<String>,
     logprobs: Option<serde_json::Value>,
@@ -50,6 +54,8 @@ pub struct ChatStreamAccumulator {
     object: Option<String>,
     created: Option<u64>,
     model: String,
+    system_fingerprint: Option<String>,
+    service_tier: Option<String>,
     choices: BTreeMap<u32, ChoiceState>,
     usage: Option<Usage>,
     extensions: Extensions,
@@ -104,6 +110,14 @@ impl ChatStreamAccumulator {
         Ok(self.build())
     }
 
+    /// 结束并返回当前累积结果，不判断完成状态。
+    ///
+    /// 用于“截断也要展示半截内容”的场景；需要严格语义时仍用 [`Self::finish`]。
+    pub fn finish_partial(self) -> (ChatCompletionResponse, StreamStatus) {
+        let status = self.status;
+        (self.build(), status)
+    }
+
     fn apply_chunk(&mut self, chunk: ChatCompletionChunk) -> Result<(), AirxError> {
         if self.id.is_empty() {
             self.id = chunk.id;
@@ -119,6 +133,12 @@ impl ChatStreamAccumulator {
         }
         if let Some(usage) = chunk.usage {
             self.usage = Some(usage);
+        }
+        if chunk.system_fingerprint.is_some() {
+            self.system_fingerprint = chunk.system_fingerprint;
+        }
+        if chunk.service_tier.is_some() {
+            self.service_tier = chunk.service_tier;
         }
         for (key, value) in chunk.extensions {
             self.extensions.entry(key).or_insert(value);
@@ -143,6 +163,11 @@ impl ChatStreamAccumulator {
                         serde_json::Value::String(state.reasoning.clone()),
                     );
                 }
+                if let Some(function_call) = &state.function_call {
+                    if let Ok(value) = serde_json::to_value(function_call) {
+                        message_extensions.insert("function_call".to_owned(), value);
+                    }
+                }
                 ChatChoice {
                     index: *index,
                     message: ResponseMessage {
@@ -161,6 +186,14 @@ impl ChatStreamAccumulator {
             })
             .collect();
 
+        let mut extensions = self.extensions.clone();
+        // 非流式响应的 service_tier 现行落在 extensions；流式保持同形。
+        if let Some(service_tier) = &self.service_tier {
+            extensions
+                .entry("service_tier".to_owned())
+                .or_insert_with(|| serde_json::Value::String(service_tier.clone()));
+        }
+
         ChatCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
@@ -168,8 +201,8 @@ impl ChatStreamAccumulator {
             model: self.model.clone(),
             choices,
             usage: self.usage.clone(),
-            system_fingerprint: None,
-            extensions: self.extensions.clone(),
+            system_fingerprint: self.system_fingerprint.clone(),
+            extensions,
         }
     }
 }
@@ -191,6 +224,27 @@ fn apply_choice(state: &mut ChoiceState, choice: ChunkChoice) {
     if choice.delta.server_tool_calls.is_some() {
         state.server_tool_calls = choice.delta.server_tool_calls;
     }
+    if let Some(refusal) = choice.delta.refusal {
+        state
+            .refusal
+            .get_or_insert_with(String::new)
+            .push_str(&refusal);
+    }
+    if let Some(function_call) = choice.delta.function_call {
+        let target = state.function_call.get_or_insert_with(Default::default);
+        if let Some(name) = function_call.name {
+            target.name = Some(name);
+        }
+        if let Some(arguments) = function_call.arguments {
+            target
+                .arguments
+                .get_or_insert_with(String::new)
+                .push_str(&arguments);
+        }
+        for (key, value) in function_call.extensions {
+            target.extensions.entry(key).or_insert(value);
+        }
+    }
     if let Some(tool_calls) = choice.delta.tool_calls {
         for call in tool_calls {
             let target = state.tool_calls.entry(call.index).or_default();
@@ -209,6 +263,17 @@ fn apply_choice(state: &mut ChoiceState, choice: ChunkChoice) {
                 }
                 for (key, value) in function.extensions {
                     target.extensions.entry(key).or_insert(value);
+                }
+            }
+            if let Some(custom) = call.custom {
+                if let Some(name) = custom.name {
+                    target.custom_name = Some(name);
+                }
+                if let Some(input) = custom.input {
+                    target.custom_input.push_str(&input);
+                }
+                for (key, value) in custom.extensions {
+                    target.custom_extensions.entry(key).or_insert(value);
                 }
             }
             for (key, value) in call.extensions {
@@ -238,15 +303,34 @@ fn build_tool_calls(calls: &BTreeMap<u32, ToolCallState>) -> Option<Vec<ToolCall
     Some(
         calls
             .values()
-            .map(|state| ToolCall {
-                id: state.id.clone().unwrap_or_default(),
-                kind: state.kind.clone().unwrap_or_else(|| "function".to_owned()),
-                function: FunctionCall {
-                    name: state.name.clone().unwrap_or_default(),
-                    arguments: state.arguments.clone(),
-                    extensions: Extensions::new(),
-                },
-                extensions: state.extensions.clone(),
+            .map(|state| {
+                let has_custom = state.custom_name.is_some()
+                    || !state.custom_input.is_empty()
+                    || state.kind.as_deref() == Some("custom");
+                let has_function = state.name.is_some()
+                    || !state.arguments.is_empty()
+                    || (!has_custom && state.kind.as_deref() != Some("custom"));
+                ToolCall {
+                    id: state.id.clone().unwrap_or_default(),
+                    kind: state.kind.clone().unwrap_or_else(|| {
+                        if has_custom && !has_function {
+                            "custom".to_owned()
+                        } else {
+                            "function".to_owned()
+                        }
+                    }),
+                    function: has_function.then(|| FunctionCall {
+                        name: state.name.clone().unwrap_or_default(),
+                        arguments: state.arguments.clone(),
+                        extensions: Extensions::new(),
+                    }),
+                    custom: has_custom.then(|| CustomToolCall {
+                        name: state.custom_name.clone().unwrap_or_default(),
+                        input: state.custom_input.clone(),
+                        extensions: state.custom_extensions.clone(),
+                    }),
+                    extensions: state.extensions.clone(),
+                }
             })
             .collect(),
     )
@@ -318,8 +402,9 @@ mod tests {
             .as_ref()
             .expect("tool calls");
         assert_eq!(calls[0].id, "call_1");
-        assert_eq!(calls[0].function.name, "lookup");
-        assert_eq!(calls[0].function.arguments, r#"{"q":"singapore"}"#);
+        let function = calls[0].function.as_ref().expect("function");
+        assert_eq!(function.name, "lookup");
+        assert_eq!(function.arguments, r#"{"q":"singapore"}"#);
         assert_eq!(response.choices[0].message.content, None);
     }
 
@@ -377,5 +462,112 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("思考")
         );
+    }
+
+    #[test]
+    fn streaming_refusal_fingerprint_and_tier_match_non_streaming() {
+        let mut acc = ChatStreamAccumulator::new();
+        acc.apply(ChatStreamEvent::Chunk(chunk(json!({
+            "id": "chatcmpl-1",
+            "model": "gpt-4o-mini",
+            "system_fingerprint": "fp_1",
+            "service_tier": "default",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "refusal": "no"}}]
+        }))))
+        .expect("chunk 1");
+        acc.apply(ChatStreamEvent::Chunk(chunk(json!({
+            "id": "chatcmpl-1",
+            "model": "gpt-4o-mini",
+            "choices": [{"index": 0, "delta": {"refusal": "pe"}}]
+        }))))
+        .expect("chunk 2");
+        acc.apply(ChatStreamEvent::Done).expect("done");
+
+        let response = acc.finish().expect("response");
+        assert_eq!(response.system_fingerprint.as_deref(), Some("fp_1"));
+        assert_eq!(response.choices[0].message.refusal.as_deref(), Some("nope"));
+        assert_eq!(
+            response
+                .extensions
+                .get("service_tier")
+                .and_then(serde_json::Value::as_str),
+            Some("default")
+        );
+    }
+
+    #[test]
+    fn legacy_function_call_delta_is_preserved_in_message_extensions() {
+        let mut acc = ChatStreamAccumulator::new();
+        acc.apply(ChatStreamEvent::Chunk(chunk(json!({
+            "id": "1",
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"function_call": {"name": "lookup", "arguments": "{\"q\":"}}}]
+        }))))
+        .expect("chunk 1");
+        acc.apply(ChatStreamEvent::Chunk(chunk(json!({
+            "id": "1",
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"function_call": {"arguments": "1}"}}}]
+        }))))
+        .expect("chunk 2");
+        acc.apply(ChatStreamEvent::Done).expect("done");
+
+        let response = acc.finish().expect("response");
+        let function_call = &response.choices[0].message.extensions["function_call"];
+        assert_eq!(function_call["name"], "lookup");
+        assert_eq!(function_call["arguments"], "{\"q\":1}");
+    }
+
+    #[test]
+    fn finish_partial_returns_truncated_content() {
+        let mut acc = ChatStreamAccumulator::new();
+        acc.apply(ChatStreamEvent::Chunk(chunk(json!({
+            "id": "1",
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "half"}}]
+        }))))
+        .expect("chunk");
+
+        let (response, status) = acc.finish_partial();
+        assert_eq!(response.first_content(), Some("half"));
+        assert_eq!(status, airx_core::stream::StreamStatus::Active);
+    }
+
+    #[test]
+    fn custom_tool_call_deltas_do_not_synthesize_function() {
+        let mut acc = ChatStreamAccumulator::new();
+        acc.apply(ChatStreamEvent::Chunk(chunk(json!({
+            "id": "1",
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"tool_calls": [
+                {"index": 0, "id": "c1", "type": "custom", "custom": {"name": "code"}}
+            ]}}]
+        }))))
+        .expect("chunk 1");
+        acc.apply(ChatStreamEvent::Chunk(chunk(json!({
+            "id": "1",
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"tool_calls": [
+                {"index": 0, "custom": {"input": "print(1)"}}
+            ]}, "finish_reason": "tool_calls"}]
+        }))))
+        .expect("chunk 2");
+        acc.apply(ChatStreamEvent::Done).expect("done");
+
+        let response = acc.finish().expect("response");
+        let call = &response.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("calls")[0];
+        assert_eq!(call.kind, "custom");
+        assert!(call.function.is_none());
+        assert_eq!(call.custom.as_ref().map(|c| c.name.as_str()), Some("code"));
+        assert_eq!(
+            call.custom.as_ref().map(|c| c.input.as_str()),
+            Some("print(1)")
+        );
+        assert_eq!(call.name(), Some("code"));
+        assert_eq!(call.arguments(), Some("print(1)"));
     }
 }

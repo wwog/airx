@@ -17,12 +17,22 @@ use crate::gemini::config::GeminiConfig;
 use super::content::{Content, Part};
 use super::endpoint::model_path;
 use super::generation::GenerationConfig;
+use super::request::GenerateContentRequest;
 use super::tool::Tool;
 
 /// countTokens 请求。
+///
+/// 官方支持两种互斥形态：`contents`（+/`systemInstruction`/`tools`/
+/// `generationConfig`），或整体 [`CountTokensRequest::generate_content_request`]。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CountTokensRequest {
+    /// 模型资源名（官方在路径中要求；body 中一般不写）。
+    ///
+    /// 只有嵌套的 `generateContentRequest` 形态需要/会自动补写。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// 对话内容。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contents: Vec<Content>,
     /// 系统指令。
     #[serde(
@@ -41,6 +51,13 @@ pub struct CountTokensRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub generation_config: Option<GenerationConfig>,
+    /// 整体形态：直接嵌入一个 `generateContentRequest`。
+    #[serde(
+        rename = "generateContentRequest",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub generate_content_request: Option<Box<GenerateContentRequest>>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -51,11 +68,25 @@ impl CountTokensRequest {
     pub fn builder() -> CountTokensRequestBuilder {
         CountTokensRequestBuilder::default()
     }
+
+    /// 用完整的 `generateContentRequest` 构造（官方 `generateContentRequest` 形态）。
+    pub fn of(request: &GenerateContentRequest) -> Self {
+        Self {
+            model: request.model.clone(),
+            contents: Vec::new(),
+            system_instruction: None,
+            tools: None,
+            generation_config: None,
+            generate_content_request: Some(Box::new(request.clone())),
+            extensions: Extensions::new(),
+        }
+    }
 }
 
 /// [`CountTokensRequest`] 构建器。
 #[derive(Debug, Default, Clone)]
 pub struct CountTokensRequestBuilder {
+    model: Option<String>,
     contents: Vec<Content>,
     system_instruction: Option<Content>,
     tools: Option<Vec<Tool>>,
@@ -114,6 +145,13 @@ impl CountTokensRequestBuilder {
         self
     }
 
+    /// 显式设置模型资源名（一般由端点按路径补写）。
+    #[must_use]
+    pub fn model_id(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
     /// 添加扩展字段。
     #[must_use]
     pub fn extension(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
@@ -130,10 +168,12 @@ impl CountTokensRequestBuilder {
         }
 
         Ok(CountTokensRequest {
+            model: self.model,
             contents: self.contents,
             system_instruction: self.system_instruction,
             tools: self.tools,
             generation_config: self.generation_config,
+            generate_content_request: None,
             extensions: self.extensions,
         })
     }
@@ -184,7 +224,15 @@ impl Endpoint for CountTokensEndpoint {
     type Response = CountTokensResponse;
 
     fn encode(&self, request: &Self::Request) -> Result<HttpRequest, AirxError> {
-        let body = serde_json::to_vec(request)
+        let mut request = request.clone();
+        // 嵌套 `generateContentRequest` 形态要求 body 内带 `model`；
+        // 简单形态的 model 只在路径里（REST 把顶层 model 记为路径参数）。
+        if let Some(nested) = request.generate_content_request.as_mut() {
+            if nested.model.is_none() {
+                nested.model = Some(model_path(&self.model)?);
+            }
+        }
+        let body = serde_json::to_vec(&request)
             .map_err(|error| AirxError::Serialization(SerializationError::from(error)))?;
 
         let mut http = HttpRequest::post(self.uri()?).with_body(body);
@@ -239,5 +287,44 @@ mod tests {
         let response: CountTokensResponse =
             serde_json::from_value(json!({"totalTokens": 42})).expect("response");
         assert_eq!(response.total_tokens, 42);
+    }
+
+    #[test]
+    fn of_wraps_generate_content_request() {
+        let request = GenerateContentRequest::builder()
+            .system("be brief")
+            .user("hi")
+            .build()
+            .expect("generate request");
+        let tokens = CountTokensRequest::of(&request);
+
+        let value = serde_json::to_value(&tokens).expect("serialize");
+        assert_eq!(
+            value["generateContentRequest"]["contents"][0]["parts"][0]["text"],
+            "hi"
+        );
+        assert!(value.get("contents").is_none(), "contents 被忽略");
+    }
+
+    #[test]
+    fn endpoint_fills_nested_model() {
+        let request = GenerateContentRequest::builder()
+            .user("hi")
+            .build()
+            .expect("generate request");
+        let endpoint = CountTokensEndpoint::new(GeminiConfig::new("k"), "gemini-2.5-flash");
+        let http = endpoint
+            .encode(&CountTokensRequest::of(&request))
+            .expect("encode");
+        let body: Value = serde_json::from_slice(&http.body).expect("body");
+
+        assert_eq!(
+            body["generateContentRequest"]["model"],
+            "models/gemini-2.5-flash"
+        );
+        assert_eq!(
+            http.uri.path(),
+            "/v1beta/models/gemini-2.5-flash:countTokens"
+        );
     }
 }

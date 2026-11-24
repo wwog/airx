@@ -73,7 +73,7 @@ async fn streams_text_tool_calls_and_usage_through_accumulator() {
         .tool_calls
         .as_ref()
         .expect("tool calls");
-    assert_eq!(calls[0].function.arguments, r#"{"q":"singapore"}"#);
+    assert_eq!(calls[0].arguments(), Some(r#"{"q":"singapore"}"#));
 
     // 请求侧自动带上 stream 与 include_usage。
     let sent: Value = serde_json::from_slice(&mock.requests()[0].body).expect("body");

@@ -12,11 +12,18 @@ use airx_protocol::StreamingEndpoint;
 use airx_protocol::gemini::GeminiConfig;
 use airx_protocol::gemini::generate_content::{
     GenerateContentEndpoint, GenerateContentRequest, GenerateContentResponse,
+    GenerateContentStreamAccumulator, Part,
 };
 use serde_json::{Value, json};
 
 const REQUEST_FIXTURE: &str = include_str!("fixtures/gemini/generate/request.json");
+const REQUEST_WITH_SIGNATURE: &str =
+    include_str!("fixtures/gemini/generate/request_with_signature.json");
+const REQUEST_WITH_PART_METADATA: &str =
+    include_str!("fixtures/gemini/generate/request_with_part_metadata.json");
 const RESPONSE_FIXTURE: &str = include_str!("fixtures/gemini/generate/response.json");
+const RESPONSE_CONTINUATION: &str =
+    include_str!("fixtures/gemini/generate/response_continuation.json");
 const ERROR_FIXTURE: &str = include_str!("fixtures/gemini/generate/error.json");
 
 fn endpoint() -> GenerateContentEndpoint {
@@ -145,7 +152,7 @@ fn encode_builds_post_with_auth_and_json_body() {
     assert_eq!(body["contents"][0]["parts"][0]["text"], "hi");
     assert_eq!(body["systemInstruction"]["parts"][0]["text"], "be brief");
     assert_eq!(body["generationConfig"]["maxOutputTokens"], 64);
-    assert!(body.get("model").is_none());
+    assert_eq!(body["model"], "models/gemini-2.5-flash");
 }
 
 #[test]
@@ -283,4 +290,142 @@ fn stream_error_event_is_an_error() {
         }
         other => panic!("unexpected: {other:?}"),
     }
+}
+
+#[test]
+fn signature_is_a_part_level_sibling_and_survives_roundtrip() {
+    let request: GenerateContentRequest =
+        serde_json::from_str(REQUEST_WITH_SIGNATURE).expect("deserialize request");
+
+    let model_turn = &request.contents[1];
+    let call = &model_turn.parts[0];
+    assert_eq!(call.thought_signature(), Some("Signature A"));
+    match call {
+        Part::FunctionCall(function_call) => {
+            assert_eq!(function_call.name, "get_weather");
+            assert_eq!(function_call.thought_signature(), Some("Signature A"));
+        }
+        other => panic!("unexpected part: {other:?}"),
+    }
+
+    let video_part = &request.contents[2].parts[0];
+    assert_eq!(
+        video_part
+            .video_metadata()
+            .and_then(|video| video.start_offset.as_deref()),
+        Some("1s")
+    );
+    assert_eq!(video_part.media_resolution(), Some("MEDIA_RESOLUTION_LOW"));
+
+    // 签名写在 functionCall 的兄弟层，不在 functionCall 内部。
+    let value = serde_json::to_value(&request).expect("serialize request");
+    let serialized_call = &value["contents"][1]["parts"][0];
+    assert_eq!(serialized_call["thoughtSignature"], "Signature A");
+    assert!(
+        serialized_call["functionCall"]
+            .get("thoughtSignature")
+            .is_none()
+    );
+
+    let fixture: Value = serde_json::from_str(REQUEST_WITH_SIGNATURE).expect("fixture");
+    assert_eq!(strip_nulls(value), strip_nulls(fixture));
+}
+
+#[test]
+fn part_metadata_roundtrip_keeps_unknown_siblings() {
+    let fixture: Value = serde_json::from_str(REQUEST_WITH_PART_METADATA).expect("fixture");
+    let request: GenerateContentRequest =
+        serde_json::from_str(REQUEST_WITH_PART_METADATA).expect("deserialize request");
+
+    let part = &request.contents[2].parts[0];
+    assert_eq!(part.part_metadata(), Some(&json!({"trace": "trace-1"})));
+    assert!(part.extensions().contains_key("futureSibling"));
+    match part {
+        Part::FunctionResponse(response) => {
+            assert_eq!(response.response, json!({"$ref": "chart_image"}));
+            let attachments = response.parts.as_ref().expect("parts");
+            assert_eq!(attachments[0].display_name(), Some("chart_image"));
+        }
+        other => panic!("unexpected part: {other:?}"),
+    }
+
+    let value = serde_json::to_value(&request).expect("serialize request");
+    assert_eq!(strip_nulls(value), strip_nulls(fixture));
+}
+
+#[test]
+fn new_request_fields_are_typed() {
+    let request: GenerateContentRequest =
+        serde_json::from_str(REQUEST_WITH_SIGNATURE).expect("deserialize request");
+
+    assert_eq!(
+        request.service_tier,
+        Some(airx_protocol::gemini::generate_content::ServiceTier::Priority)
+    );
+    assert_eq!(request.store, Some(true));
+    assert_eq!(
+        request
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get("safety_identifier"))
+            .map(String::as_str),
+        Some("user-42")
+    );
+    assert_eq!(
+        request.continuation_token.as_deref(),
+        Some("continuation-1")
+    );
+
+    let tool_config = request.tool_config.expect("tool config");
+    assert_eq!(
+        tool_config
+            .function_calling_config
+            .as_ref()
+            .and_then(|config| config.mode),
+        Some(airx_protocol::gemini::generate_content::FunctionCallingMode::Validated)
+    );
+    assert_eq!(tool_config.include_server_side_tool_invocations, Some(true));
+}
+
+#[test]
+fn continuation_response_requires_continuation() {
+    let response: GenerateContentResponse =
+        serde_json::from_str(RESPONSE_CONTINUATION).expect("response");
+
+    assert_eq!(response.requires_continuation(), Some("continuation-2"));
+    assert_eq!(response.text(), "部分输出");
+    assert!(!response.is_blocked());
+
+    let mut accumulator = GenerateContentStreamAccumulator::new();
+    accumulator.apply(response).expect("apply");
+    assert!(!accumulator.status().is_success());
+    assert_eq!(
+        accumulator.requires_continuation().as_deref(),
+        Some("continuation-2")
+    );
+}
+
+#[test]
+fn done_frame_is_skipped() {
+    let event = streaming_endpoint()
+        .decode_event(raw_event("[DONE]"))
+        .expect("done");
+    assert!(event.is_none());
+}
+
+#[test]
+fn model_in_body_can_be_overridden() {
+    let request = GenerateContentRequest::builder()
+        .user("hi")
+        .model_id("models/custom-gateway-model")
+        .build()
+        .expect("request");
+
+    let http = endpoint().encode(&request).expect("encode");
+    let body: Value = serde_json::from_slice(&http.body).expect("body");
+    assert_eq!(body["model"], "models/custom-gateway-model");
+    assert_eq!(
+        http.uri.path(),
+        "/v1beta/models/gemini-2.5-flash:generateContent"
+    );
 }

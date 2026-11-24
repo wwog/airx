@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use airx_core::AirxError;
+use airx_core::error::ConfigurationError;
 use airx_core::http::{HttpRequest, HttpResponse};
 use airx_core::model::ModelId;
 use airx_protocol::openai::OpenAiConfig;
@@ -13,22 +14,33 @@ use airx_protocol::openai::batches::{
     BatchEndpoint, BatchList, BatchObject, CreateBatchEndpoint, CreateBatchRequest,
     ListBatchesEndpoint, ListBatchesRequest,
 };
+#[cfg(feature = "stream")]
+use airx_protocol::openai::chat::StreamOptions;
 use airx_protocol::openai::chat::{
-    ChatCompletionRequest, ChatCompletionResponse, ChatEndpoint, StreamOptions,
+    ChatCompletionDeleteResponse, ChatCompletionList, ChatCompletionListRequest,
+    ChatCompletionRequest, ChatCompletionResponse, ChatCompletionUpdateRequest, ChatEndpoint,
+    DeleteChatCompletionEndpoint, ListChatCompletionsEndpoint, RetrieveChatCompletionEndpoint,
+    UpdateChatCompletionEndpoint,
 };
 use airx_protocol::openai::embeddings::{EmbeddingRequest, EmbeddingResponse, EmbeddingsEndpoint};
 use airx_protocol::openai::files::{
-    DeleteFileEndpoint, FileContentEndpoint, FileDeleteResponse, FileEndpoint, FileList,
-    FileObject, ListFilesEndpoint, ListFilesRequest, UploadFileEndpoint, UploadFileRequest,
+    DeleteFileEndpoint, ExpiresAfter, FileContentEndpoint, FileDeleteResponse, FileEndpoint,
+    FileList, FileObject, ListFilesEndpoint, ListFilesRequest, UploadFileEndpoint,
+    UploadFileRequest,
 };
 use airx_protocol::openai::models::{
-    ListModels, ListModelsEndpoint, Model, ModelList, RetrieveModelEndpoint,
+    DeleteModelEndpoint, ListModels, ListModelsEndpoint, Model, ModelDeleted, ModelList,
+    RetrieveModelEndpoint,
+};
+use airx_protocol::openai::moderations::{
+    ModerationRequest, ModerationResponse, ModerationsEndpoint,
 };
 use airx_protocol::openai::responses::{
-    CancelResponseEndpoint, CountInputTokensEndpoint, DeleteResponse, DeleteResponseEndpoint,
-    InputItemList, InputTokensCount, InputTokensCountRequest, ListInputItemsEndpoint,
-    ListInputItemsRequest, ResponsesEndpoint, ResponsesRequest, ResponsesResponse,
-    RetrieveResponseEndpoint,
+    CancelResponseEndpoint, CompactRequest, CompactResponseEndpoint, CountInputTokensEndpoint,
+    DeleteResponse, DeleteResponseEndpoint, InputItemList, InputTokensCount,
+    InputTokensCountRequest, ListInputItemsEndpoint, ListInputItemsRequest, ResponsesEndpoint,
+    ResponsesRequest, ResponsesResponse, RetrieveResponseEndpoint, RetrieveResponseOptions,
+    RetrieveResponseRequest,
 };
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
@@ -131,6 +143,15 @@ impl OpenAi {
         }
     }
 
+    /// Moderations API。
+    pub fn moderations(&self) -> OpenAiModerations {
+        OpenAiModerations {
+            executor: Arc::clone(&self.executor),
+            config: self.config.clone(),
+            options: RequestOptions::default(),
+        }
+    }
+
     fn chat_with(&self, config: &OpenAiConfig) -> Chat {
         Chat {
             api: ApiClient::new(
@@ -168,10 +189,14 @@ impl Chat {
     }
 
     /// 创建一次非流式对话补全。
+    ///
+    /// `request.stream == Some(true)` 会被拒绝（配置错误）：SSE 无法按 JSON 解码，
+    /// 请改用 [`Chat::stream`]。
     pub async fn create(
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, AirxError> {
+        ensure_non_streaming(request.stream, "Chat::create", "Chat::stream")?;
         self.api.create_with(&request, &self.options).await
     }
 
@@ -180,7 +205,58 @@ impl Chat {
         &self,
         request: ChatCompletionRequest,
     ) -> Result<WithMeta<ChatCompletionResponse>, AirxError> {
+        ensure_non_streaming(request.stream, "Chat::create_with_meta", "Chat::stream")?;
         self.api.create_with_meta(&request, &self.options).await
+    }
+
+    /// 读取已存储的补全（需要创建时 `store: true`）。
+    pub async fn retrieve(
+        &self,
+        completion_id: impl Into<String>,
+    ) -> Result<ChatCompletionResponse, AirxError> {
+        let api = ApiClient::new(
+            RetrieveChatCompletionEndpoint::new(self.config()),
+            self.api.executor(),
+        );
+        let completion_id = completion_id.into();
+        api.create_with(&completion_id, &self.options).await
+    }
+
+    /// 列出已存储的补全。
+    pub async fn list(
+        &self,
+        request: ChatCompletionListRequest,
+    ) -> Result<ChatCompletionList, AirxError> {
+        let api = ApiClient::new(
+            ListChatCompletionsEndpoint::new(self.config()),
+            self.api.executor(),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 更新已存储补全的 `metadata`。
+    pub async fn update(
+        &self,
+        request: ChatCompletionUpdateRequest,
+    ) -> Result<ChatCompletionResponse, AirxError> {
+        let api = ApiClient::new(
+            UpdateChatCompletionEndpoint::new(self.config()),
+            self.api.executor(),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 删除已存储的补全。
+    pub async fn delete(
+        &self,
+        completion_id: impl Into<String>,
+    ) -> Result<ChatCompletionDeleteResponse, AirxError> {
+        let api = ApiClient::new(
+            DeleteChatCompletionEndpoint::new(self.config()),
+            self.api.executor(),
+        );
+        let completion_id = completion_id.into();
+        api.create_with(&completion_id, &self.options).await
     }
 
     /// 创建并解析结构化输出。
@@ -211,9 +287,14 @@ impl Chat {
         if request.stream_options.is_none() {
             request.stream_options = Some(StreamOptions {
                 include_usage: true,
+                include_obfuscation: None,
             });
         }
         self.api.stream_with(&request, &self.options).await
+    }
+
+    fn config(&self) -> OpenAiConfig {
+        self.api.endpoint().config().clone()
     }
 }
 
@@ -233,7 +314,11 @@ impl Responses {
     }
 
     /// 创建一次非流式响应。
+    ///
+    /// `request.stream == Some(true)` 会被拒绝（配置错误）；请改用
+    /// [`Responses::stream`]。
     pub async fn create(&self, request: ResponsesRequest) -> Result<ResponsesResponse, AirxError> {
+        ensure_non_streaming(request.stream, "Responses::create", "Responses::stream")?;
         self.api.create_with(&request, &self.options).await
     }
 
@@ -242,6 +327,11 @@ impl Responses {
         &self,
         request: ResponsesRequest,
     ) -> Result<WithMeta<ResponsesResponse>, AirxError> {
+        ensure_non_streaming(
+            request.stream,
+            "Responses::create_with_meta",
+            "Responses::stream",
+        )?;
         self.api.create_with_meta(&request, &self.options).await
     }
 
@@ -256,12 +346,36 @@ impl Responses {
 
     /// 读取已有响应。
     pub async fn retrieve(&self, id: impl Into<String>) -> Result<ResponsesResponse, AirxError> {
+        self.retrieve_with(id, RetrieveResponseOptions::default())
+            .await
+    }
+
+    /// 读取已有响应，并带上 `include` / `starting_after` / `stream` 等 query 选项。
+    ///
+    /// 注意：本方法固定按 JSON 解码，`options.stream = true` 时服务端返回 SSE，
+    /// 会得到反序列化错误；需要流式续读请使用 raw execute。
+    pub async fn retrieve_with(
+        &self,
+        id: impl Into<String>,
+        options: RetrieveResponseOptions,
+    ) -> Result<ResponsesResponse, AirxError> {
         let api = ApiClient::new(
             RetrieveResponseEndpoint::new(self.config()),
             self.api.executor(),
         );
-        let id = id.into();
-        api.create_with(&id, &self.options).await
+        let request = RetrieveResponseRequest::new(id).with_options(options);
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 压缩长对话（`POST /responses/compact`）。
+    ///
+    /// 返回的 `output` 是「用户消息 + 一个 compaction item」，可直接作为下一轮输入。
+    pub async fn compact(&self, request: CompactRequest) -> Result<ResponsesResponse, AirxError> {
+        let api = ApiClient::new(
+            CompactResponseEndpoint::new(self.config()),
+            self.api.executor(),
+        );
+        api.create_with(&request, &self.options).await
     }
 
     /// 取消后台响应。
@@ -362,6 +476,16 @@ impl OpenAiModels {
         let model = model.into();
         api.create_with(&model, &self.options).await
     }
+
+    /// 删除 fine-tuned 模型（需要 Owner 权限）。
+    pub async fn delete(&self, model: impl Into<ModelId>) -> Result<ModelDeleted, AirxError> {
+        let api = ApiClient::new(
+            DeleteModelEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let model = model.into();
+        api.create_with(&model, &self.options).await
+    }
 }
 
 /// OpenAI Embeddings 调用入口。
@@ -413,7 +537,35 @@ impl OpenAiFiles {
         purpose: impl Into<String>,
         data: impl Into<Bytes>,
     ) -> Result<FileObject, AirxError> {
-        let request = UploadFileRequest::new(filename, purpose, data, crate::multipart::boundary());
+        self.upload_request(UploadFileRequest::new(
+            filename,
+            purpose,
+            data,
+            crate::multipart::boundary(),
+        ))
+        .await
+    }
+
+    /// 上传文件，并设置过期策略（`expires_after`）。
+    pub async fn upload_with_expires_after(
+        &self,
+        filename: impl Into<String>,
+        purpose: impl Into<String>,
+        data: impl Into<Bytes>,
+        expires_after: ExpiresAfter,
+    ) -> Result<FileObject, AirxError> {
+        self.upload_request(
+            UploadFileRequest::new(filename, purpose, data, crate::multipart::boundary())
+                .with_expires_after(expires_after),
+        )
+        .await
+    }
+
+    /// 使用完整上传请求（含 multipart boundary）。
+    pub async fn upload_request(
+        &self,
+        request: UploadFileRequest,
+    ) -> Result<FileObject, AirxError> {
         let api = ApiClient::new(
             UploadFileEndpoint::new(self.config.clone()),
             Arc::clone(&self.executor),
@@ -514,4 +666,47 @@ impl OpenAiBatches {
         let id = id.into();
         api.create_with(&id, &self.options).await
     }
+}
+
+/// OpenAI Moderations 调用入口。
+#[derive(Clone)]
+pub struct OpenAiModerations {
+    executor: Arc<Executor>,
+    config: OpenAiConfig,
+    options: RequestOptions,
+}
+
+impl OpenAiModerations {
+    /// 设置本次调用的请求选项。
+    #[must_use]
+    pub fn with_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// 对文本 / 图片输入做内容分类。
+    pub async fn create(
+        &self,
+        request: ModerationRequest,
+    ) -> Result<ModerationResponse, AirxError> {
+        let api = ApiClient::new(
+            ModerationsEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+}
+
+/// 非流式入口拒绝 `stream: true`：SSE 无法按 JSON 解码，提前给出配置错误。
+fn ensure_non_streaming(
+    stream: Option<bool>,
+    method: &str,
+    alternative: &str,
+) -> Result<(), AirxError> {
+    if stream == Some(true) {
+        return Err(AirxError::Configuration(ConfigurationError::new(format!(
+            "{method} 不接受 stream=true；流式请求请使用 {alternative}"
+        ))));
+    }
+    Ok(())
 }

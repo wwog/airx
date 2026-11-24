@@ -1,0 +1,38 @@
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{ "text": "Render the chart and attach the image" }]
+    },
+    {
+      "role": "model",
+      "parts": [
+        {
+          "functionCall": { "name": "render_chart", "args": { "kind": "bar" } }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "parts": [
+        {
+          "functionResponse": {
+            "name": "render_chart",
+            "response": { "$ref": "chart_image" },
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "image/png",
+                  "data": "iVBORw0KGgo=",
+                  "displayName": "chart_image"
+                }
+              }
+            ]
+          },
+          "partMetadata": { "trace": "trace-1" },
+          "futureSibling": { "keep": true }
+        }
+      ]
+    }
+  ]
+}

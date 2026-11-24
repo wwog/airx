@@ -91,15 +91,25 @@ pub struct FunctionDefinition {
 }
 
 /// 工具调用（请求历史与响应共用）。
+///
+/// 官方 `ChatCompletionMessageToolCall = FunctionToolCall | CustomToolCall`：
+/// - `function` 只在 `type = "function"` 时存在；
+/// - `custom` 只在 `type = "custom"` 时存在。
+///
+/// 两者都可缺失（未知工具类型），此时只保留 `id` / `type` / `extensions`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     /// 调用 ID。
     pub id: String,
-    /// 类型，目前为 `function`。
+    /// 类型（`function` / `custom` / 其他）。
     #[serde(rename = "type", default = "function_kind")]
     pub kind: String,
     /// 函数调用内容。
-    pub function: FunctionCall,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<FunctionCall>,
+    /// custom 工具调用内容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<CustomToolCall>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -115,13 +125,49 @@ impl ToolCall {
         Self {
             id: id.into(),
             kind: function_kind(),
-            function: FunctionCall {
+            function: Some(FunctionCall {
                 name: name.into(),
                 arguments: arguments.into(),
                 extensions: Extensions::new(),
-            },
+            }),
+            custom: None,
             extensions: Extensions::new(),
         }
+    }
+
+    /// 构造 custom 调用（free-form 输入）。
+    pub fn custom(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        input: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            kind: "custom".to_owned(),
+            function: None,
+            custom: Some(CustomToolCall {
+                name: name.into(),
+                input: input.into(),
+                extensions: Extensions::new(),
+            }),
+            extensions: Extensions::new(),
+        }
+    }
+
+    /// 函数名（function 或 custom）。
+    pub fn name(&self) -> Option<&str> {
+        self.function
+            .as_ref()
+            .map(|function| function.name.as_str())
+            .or_else(|| self.custom.as_ref().map(|custom| custom.name.as_str()))
+    }
+
+    /// 调用参数（function 为 JSON 字符串；custom 为原始 input）。
+    pub fn arguments(&self) -> Option<&str> {
+        self.function
+            .as_ref()
+            .map(|function| function.arguments.as_str())
+            .or_else(|| self.custom.as_ref().map(|custom| custom.input.as_str()))
     }
 }
 
@@ -136,6 +182,18 @@ pub struct FunctionCall {
     pub name: String,
     /// 参数 JSON 字符串（流式期间可能不完整）。
     pub arguments: String,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// custom 工具调用内容。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomToolCall {
+    /// 工具名。
+    pub name: String,
+    /// 模型生成的原始输入（free-form 字符串，不是 JSON 参数）。
+    pub input: String,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -277,6 +335,47 @@ mod tests {
         let value = serde_json::to_value(&call).expect("serialize");
         let back: ToolCall = serde_json::from_value(value).expect("deserialize");
         assert_eq!(back, call);
+        assert_eq!(back.name(), Some("lookup"));
+    }
+
+    #[test]
+    fn custom_tool_call_decodes_and_roundtrips() {
+        let json = json!({
+            "id": "call_custom",
+            "type": "custom",
+            "custom": {"name": "shell", "input": "ls -la"}
+        });
+        let call: ToolCall = serde_json::from_value(json.clone()).expect("deserialize");
+        assert_eq!(call.kind, "custom");
+        assert!(call.function.is_none());
+        assert_eq!(call.custom.as_ref().map(|c| c.name.as_str()), Some("shell"));
+        assert_eq!(call.arguments(), Some("ls -la"));
+        assert_eq!(serde_json::to_value(&call).expect("serialize"), json);
+    }
+
+    #[test]
+    fn function_tool_call_omits_custom_field() {
+        let call = ToolCall::function("call_1", "lookup", "{}");
+        let value = serde_json::to_value(&call).expect("serialize");
+        assert_eq!(value["type"], "function");
+        assert!(value.get("custom").is_none());
+        assert_eq!(
+            value,
+            json!({"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}})
+        );
+    }
+
+    #[test]
+    fn unknown_tool_call_kind_keeps_extensions() {
+        let json = json!({
+            "id": "call_1",
+            "type": "future_tool",
+            "future_payload": {"a": 1}
+        });
+        let call: ToolCall = serde_json::from_value(json.clone()).expect("deserialize");
+        assert!(call.function.is_none());
+        assert!(call.custom.is_none());
+        assert_eq!(serde_json::to_value(&call).expect("serialize"), json);
     }
 }
 

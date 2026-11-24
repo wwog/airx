@@ -64,6 +64,21 @@ impl RequestOptions {
         self
     }
 
+    /// 选择 Anthropic Workspace（Header `anthropic-workspace-id`）。
+    ///
+    /// 未绑定 Workspace 的凭据必须带上该 Header；它**不是** body 字段，
+    /// 不要走 `extensions`。
+    pub fn workspace(self, workspace_id: impl Into<String>) -> Result<Self, AirxError> {
+        self.try_header("anthropic-workspace-id", &workspace_id.into())
+    }
+
+    /// 指定 Anthropic User Profile（Header `anthropic-user-profile-id`）。
+    ///
+    /// 代表组织之外的第三方发起请求时使用。同样是 Header，不是 body 字段。
+    pub fn user_profile(self, profile_id: impl Into<String>) -> Result<Self, AirxError> {
+        self.try_header("anthropic-user-profile-id", &profile_id.into())
+    }
+
     /// 单次请求超时。
     ///
     /// 非流式请求限制整个调用；流式请求只限制“建立连接”阶段。
@@ -153,5 +168,25 @@ mod tests {
                 .try_header("bad header", "value")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn workspace_and_user_profile_are_headers() {
+        let mut request = request();
+        let options = RequestOptions::new()
+            .workspace("wrkspc_1")
+            .expect("workspace")
+            .user_profile("profile_1")
+            .expect("profile");
+
+        options.apply(&mut request).expect("apply");
+
+        assert_eq!(request.headers["anthropic-workspace-id"], "wrkspc_1");
+        assert_eq!(request.headers["anthropic-user-profile-id"], "profile_1");
+    }
+
+    #[test]
+    fn workspace_rejects_invalid_value() {
+        assert!(RequestOptions::new().workspace("bad\nid").is_err());
     }
 }

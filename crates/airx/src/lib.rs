@@ -43,10 +43,11 @@ pub use builder::GeminiBuilder;
 pub use builder::OpenAiBuilder;
 pub use client::Client;
 #[cfg(feature = "gemini")]
-pub use gemini::{Gemini, GeminiEmbeddings, GeminiModels, GenerateContent};
+pub use gemini::{Gemini, GeminiCaches, GeminiEmbeddings, GeminiModels, GenerateContent};
 #[cfg(feature = "openai")]
 pub use openai::{
-    Chat, OpenAi, OpenAiBatches, OpenAiEmbeddings, OpenAiFiles, OpenAiModels, Responses,
+    Chat, OpenAi, OpenAiBatches, OpenAiEmbeddings, OpenAiFiles, OpenAiModels, OpenAiModerations,
+    Responses,
 };
 #[cfg(any(feature = "openai", feature = "anthropic", feature = "gemini"))]
 pub use options::RequestOptions;

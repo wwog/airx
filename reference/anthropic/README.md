@@ -3,6 +3,7 @@
 本目录是 **Anthropic Claude API 的离线行为参照**：官方文档 markdown 快照、官方
 `@anthropic-ai/sdk` 裁剪后的类型声明、以及从 SDK 静态生成的完整 API 清单。
 不参与 Cargo 构建，不是运行时依赖；只用于“官方到底怎么写的”这类问题。
+与 airx 实现的逐项差距见 [`GAP.md`](GAP.md)。
 
 约定见上一级 [`../README.md`](../README.md)。
 

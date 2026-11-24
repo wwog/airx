@@ -3,28 +3,31 @@
 本文记录各协议已实现的能力与当前边界。实现位于 `airx-protocol`，全部为纯编解码，
 不依赖传输层。
 
-> **对齐基准：2026-11-23。**
-> 官方文档站点在部分区域不可达，参数以官方 SDK 的生成类型 / 请求签名为准：
-> Anthropic Python SDK `messages.create`、OpenAI Python SDK Chat/Responses 参数、
-> Gemini `generateContent` REST 参考、DeepSeek JSON mode 指南。协议参数会随模型变化，接入新模型前请先核对
+> **对齐基准：2026-11-24。**
+> 以官方 SDK 生成类型 + 官方文档 markdown 快照为准（可用 `reference/` 下的脚本复现）：
+> `openai@7.63.0`、`@anthropic-ai/sdk@1.13.0`、`@google/genai@3.6.1`。
+> 协议参数会随模型变化，接入新模型前请先核对
 > [compatibility.md](compatibility.md) 与官方最新文档。
 
 ## OpenAI Chat Completions
 
 | 能力 | 状态 |
 | --- | --- |
-| 请求：model / messages / temperature / top_p / stop / user | 已实现 |
+| 请求：model / messages / temperature / top_p / stop / user | 已实现（`user` 已弃用，优先 `safety_identifier`） |
 | 请求：`max_completion_tokens`（推荐，含推理 token） | 已实现 |
 | 请求：`max_tokens` | 已实现但**已弃用**；o-series 不兼容 |
 | 请求：`reasoning_effort`（none/minimal/low/medium/high/xhigh/max） | 已实现 |
 | 请求：`verbosity`（low/medium/high） | 已实现 |
-| 请求：tools / tool_choice / parallel_tool_calls | 已实现 |
+| 请求：`n` / `seed` / penalties / `logprobs` + `top_logprobs` | 已实现 |
+| 请求：`store` / `metadata` / `service_tier` / `safety_identifier` / `prompt_cache_key` + `prompt_cache_options` / `prompt_cache_retention` | 已实现 |
+| 请求：tools / tool_choice / parallel_tool_calls | 已实现；custom tool call 原样保留 |
 | 请求：response_format（text / json_object / json_schema） | 已实现 |
-| 请求：stream / stream_options.include_usage | 已实现 |
-| 消息：system / user（文本或多模态）/ assistant（文本 + tool_calls）/ tool | 已实现 |
-| 响应：choices / usage / system_fingerprint / 未知字段保留 | 已实现 |
+| 请求：stream / stream_options（`include_usage` / `include_obfuscation`） | 已实现 |
+| 消息：system / developer / user（文本或多模态）/ assistant（文本 + tool_calls + refusal）/ tool / function | 已实现；支持 `name`、`input_audio`、`file` 片段 |
+| 响应：choices / usage / system_fingerprint / refusal / 未知字段保留 | 已实现 |
+| 存储补全：retrieve / list / update / delete | 已实现（需 `store: true`） |
 | 错误体：message / type / code / param → ProviderError | 已实现 |
-| 流式：chunk / delta / tool_calls 增量 / `reasoning_content` / `[DONE]` / usage chunk | 已实现 |
+| 流式：chunk / delta / tool_calls 增量 / `reasoning_content` / `refusal` / `[DONE]` / usage chunk | 已实现 |
 | 聚合：`ChatStreamAccumulator`（合并 reasoning 到 `extensions.reasoning_content`；无 `[DONE]` 报 Incomplete） | 已实现 |
 | 未覆盖参数 | 通过 `extensions` 透传 |
 
@@ -35,64 +38,74 @@
 | 请求：model / input（文本或 item）/ instructions / max_output_tokens / temperature / top_p | 已实现 |
 | 请求：`reasoning.effort` / `reasoning.summary` / `text.format` / `text.verbosity` | 已实现 |
 | 请求：`previous_response_id` / `store` / `background` / `include` / `truncation` / `conversation` / `metadata` / `service_tier` / `prompt_cache_key` / `safety_identifier` / `max_tool_calls` | 已实现 |
-| 请求：tools / tool_choice / parallel_tool_calls | 已实现 |
+| 请求：`context_management` / `top_logprobs` / `user` / `prompt` / `stream_options` | 已实现 |
+| 请求：tools / tool_choice / parallel_tool_calls | 已实现；函数工具为扁平 `{type,name,parameters,strict}` |
 | 输入 item：message（文本或多模态）/ function_call / function_call_output / reasoning / item_reference | 已实现；未知保留 |
-| 输出 item：message（output_text / refusal）/ function_call / reasoning / web_search_call / file_search_call / code_interpreter_call / image_generation_call / mcp_call | 已实现；其余保留 |
+| 输出 item：message（output_text / refusal）/ function_call / custom_tool_call / reasoning / compaction / web_search_call / file_search_call / code_interpreter_call / image_generation_call / mcp_call | 已实现；其余保留 |
+| 输出回传：`From<OutputItem> for InputItem`、`ResponsesResponse::into_input()` | 已实现；便于 `store: false` 多轮 |
 | 未知 item / content / 事件 | `Other(Value)` / `Unknown(Value)` 原样保留 |
 | 流式事件：created / in_progress / content_part.added·done / output_item.added·done / output_text.delta·done / refusal.delta·done / reasoning_summary_text.delta·done / function_call_arguments.delta·done / 服务端工具生命周期（`ServerToolCall`） / completed / failed / incomplete / error | 已实现 |
 | 流式未知事件 | `Unknown(Value)` |
-| 聚合：`ResponsesStreamAccumulator`（文本 / 工具参数 / reasoning 摘要 / refusal；无 completed 报 Incomplete） | 已实现 |
-| 生命周期：retrieve / cancel / delete / input_items / input_tokens | 已实现 |
+| 聚合：`ResponsesStreamAccumulator`（文本 / 工具参数 / reasoning 摘要 / refusal；无 completed 报 Incomplete） | 已实现；`finish_partial()` 可取部分结果 |
+| 生命周期：retrieve（支持 include / starting_after）/ compact / cancel / delete / input_items / input_tokens | 已实现 |
 
 ## Anthropic Messages
 
 | 能力 | 状态 |
 | --- | --- |
-| 请求：model / max_tokens（必填）/ messages / system / stop_sequences | 已实现 |
+| 请求：model / max_tokens（必填）/ messages / system / stop_sequences | 已实现；`system` 支持字符串或文本块数组 |
 | **已移除**：temperature / top_p / top_k | 最新 Messages API 不再接受这些参数 |
 | 请求：`output_config.effort`（low/medium/high/xhigh/max） | 已实现 |
 | 请求：`output_config.format`（`json_schema` 结构化输出） | 已实现 |
 | 请求：`thinking`（enabled + budget_tokens / disabled / between_tools / adaptive） | 已实现 |
-| 请求：tools / tool_choice | 已实现 |
-| 内容块：text / image / tool_use / tool_result / thinking / redacted_thinking | 已实现 |
+| 请求：`metadata` / `service_tier` / `speed` / `inference_geo` / `diagnostics` / `container` / 顶层 `cache_control` | 已实现 |
+| 请求：tools / tool_choice | 已实现；tool 支持 `strict` / `cache_control` / `input_examples` / `eager_input_streaming` / `defer_loading`；tool_choice 支持 `none` 与 `disable_parallel_tool_use` |
+| 内容块：text / image / document / tool_use / tool_result / thinking / redacted_thinking / server_tool_use / web_search_tool_result | 已实现 |
 | 未知内容块 | `Other(Value)` 原样保留 |
-| 响应：content / stop_reason / usage（含缓存 token） | 已实现 |
-| 错误体：type / message → ProviderError | 已实现 |
-| 流式事件：message_start / content_block_start·delta·stop / message_delta / message_stop / ping / error | 已实现 |
+| 响应：content / stop_reason / usage（含缓存 token / thinking tokens） | 已实现；`is_tool_use()` / `is_paused()` / `is_refusal()` / `is_truncated()` 等助手 |
+| 错误体：type / message / request_id / error_code → ProviderError | 已实现 |
+| 流式事件：message_start / content_block_start·delta·stop / message_delta / message_stop / ping / error | 已实现；保留 `stop_details` / `container` / citations |
 | 流式未知事件 | `Unknown(Value)`；`ping` 在协议层过滤 |
-| 聚合：`MessagesStreamAccumulator`（tool 参数增量拼接后解析） | 已实现 |
-| 计 token：`POST {messages_path}/count_tokens` | 已实现 |
+| 聚合：`MessagesStreamAccumulator`（tool 参数增量拼接后解析） | 已实现；`finish_partial()` 可在流内错误时取部分结果 |
+| 计 token：`POST {messages_path}/count_tokens` | 已实现；覆盖 system 块 / tools / tool_choice / thinking / output_config / cache_control / speed |
+| 批量：create / retrieve / list / cancel / results（typed）/ **delete** | 已实现 |
+| Files：upload / list（`page` + `next_page` + `ids`）/ metadata / download / delete（`{id,type}`） | 已实现 |
+| 版本头：默认 `2026-10-21` | 可 `with_api_version` 覆盖（兼容网关需显式固定） |
 
-`output_config` / `thinking` 的 `display` 等新字段已建模；账号级参数
-（`inference_geo` / `service_tier` / `speed` / `workspace_id` 等）暂通过 `extensions` 透传。
+`system` 可写成字符串或 `TextBlock[]`；`workspace_id` / `user_profile_id` 是 Header
+（`anthropic-workspace-id` / `anthropic-user-profile-id`），通过 `RequestOptions::workspace` /
+`RequestOptions::user_profile` 发送，不写进请求体。账号级参数仍可用 `extensions` 透传。
 
 ## Gemini generateContent
 
-Gemini 的模型位于路径中（`/models/{model}:generateContent`），因此
-`GenerateContentEndpoint` 持有模型，请求体只对应官方 JSON body。
+Gemini 的模型位于路径中（`/models/{model}:generateContent`）；请求体也会自动写入
+`model`（与官方 REST 参考一致），可用 `model_id` 覆盖。
 
 | 能力 | 状态 |
 | --- | --- |
 | 请求：`contents`（role + parts）/ `systemInstruction` | 已实现 |
-| 请求：`generationConfig`（temperature / topP / topK / candidateCount / maxOutputTokens / stopSequences / penalties / seed / responseModalities / mediaResolution / speechConfig / imageConfig） | 已实现 |
-| 请求：结构化输出（`responseMimeType` + `responseSchema` / `responseJsonSchema`） | 已实现 |
+| 请求：`generationConfig`（temperature / topP / topK / candidateCount / maxOutputTokens / stopSequences / penalties / seed / responseModalities / mediaResolution / speechConfig / imageConfig / logprobs / translationConfig / audioTranscriptionConfig 等） | 已实现 |
+| 请求：结构化输出（`responseMimeType` + `responseJsonSchema`；兼容 `responseSchema`） | 已实现；`responseSchema` 已被 SDK 标 deprecated |
 | 请求：`thinkingConfig`（`thinkingBudget` / `includeThoughts` / `thinkingLevel`） | 已实现 |
-| 请求：`tools`（`functionDeclarations`）/ `toolConfig`（AUTO / ANY / NONE + allowedFunctionNames） | 已实现 |
+| 请求：`tools`（`functionDeclarations`）/ `toolConfig`（AUTO / ANY / NONE / VALIDATED / MODE_UNSPECIFIED + allowedFunctionNames） | 已实现 |
 | 请求：服务端工具（`googleSearch` / `codeExecution` / `urlContext` 等） | `Tool::server(...)` 原样透传 |
-| 请求：`safetySettings` / `cachedContent` | 已实现 |
-| 内容片段：`text`（含 `thought` / `thoughtSignature`）/ `inlineData` / `fileData` / `functionCall` / `functionResponse` / `executableCode` / `codeExecutionResult` | 已实现 |
-| 未知片段 / 未知字段 | `Part::Other(Value)` 与 `extensions` 原样保留 |
-| 响应：`candidates`（content / finishReason / safetyRatings / citation / grounding / logprobs）/ `promptFeedback` / `usageMetadata` / `modelVersion` / `responseId` | 已实现 |
+| 请求：`safetySettings` / `cachedContent` / `serviceTier` / `store` / `labels` / `continuationToken` | 已实现 |
+| 内容片段：`text`（含 `thought`）/ `inlineData` / `fileData` / `functionCall` / `functionResponse`（含 `parts`）/ `executableCode` / `codeExecutionResult` | 已实现；`thoughtSignature` / `videoMetadata` / `partMetadata` / `mediaResolution` 在 **Part 级** |
+| 未知片段 / 未知字段 | `Part::Other(Value)` 与各变体 `extensions` 原样保留（含 Part 级未知兄弟键） |
+| 响应：`candidates`（content / finishReason / safetyRatings / citation / grounding / logprobs）/ `promptFeedback`（含 `blockReasonMessage`）/ `usageMetadata` / `modelVersion` / `responseId` | 已实现 |
 | 错误体：`error.code` / `message` / `status` / `details` → ProviderError | 已实现 |
-| 流式：`alt=sse`，每个 data 为 `GenerateContentResponse` 增量 | 已实现 |
-| 聚合：`GenerateContentStreamAccumulator`（文本按 thought 标记合并；`finishReason` 或 `blockReason` 判定完成） | 已实现 |
-| 计 token：`POST /models/{model}:countTokens` | 已实现 |
+| 流式：`alt=sse`，每个 data 为 `GenerateContentResponse` 增量；容忍 `[DONE]` 帧 | 已实现 |
+| 聚合：`GenerateContentStreamAccumulator`（文本按 thought 标记合并；所有候选终态才完成；`CONTINUATION` 不算完成） | 已实现 |
+| 计 token：`countTokens`（支持 `generateContentRequest` 形态）/ `computeTokens` | 已实现 |
 | 模型列表：`GET /models`（pageSize / pageToken）/ `GET /models/{model}` | 已实现 |
-| 未覆盖：Vertex AI 专属参数、Live API | 未封装；用 Raw 扩展字段 / 原生 Endpoint |
+| 缓存：`cachedContents` create / get / list / update / delete | 已实现 |
+| 未覆盖：Files / Batches / Interactions / Live API / Vertex AI 专属参数 | 未封装；用 Raw 扩展字段 / 原生 Endpoint |
 
-Gemini 流没有 `[DONE]` 哨兵。`finish()` 只有在收到候选的 `finishReason`
-（或输入被拦截的 `promptFeedback.blockReason`）时才返回成功；EOF 提前发生返回
-`Incomplete`。`FINISH_REASON_UNSPECIFIED` 不视为完成。
+Gemini 流没有 `[DONE]` 哨兵（出现时跳过）。`finish()` 只有在候选的 `finishReason`
+终态（或输入被拦截的 `promptFeedback.blockReason`）时才返回成功；`CONTINUATION`
+需要回传 `continuationToken` 继续，视为未完成；EOF 提前发生返回 `Incomplete`。
+`FINISH_REASON_UNSPECIFIED` 不视为完成；`SAFETY` / `NO_IMAGE` / `MALFORMED_*` 可通过
+`is_blocked()` 判定。
 
 认证使用 `x-goog-api-key`（不把 key 放进 URL）；默认基地址
 `https://generativelanguage.googleapis.com/v1beta`。模型可写 `gemini-2.5-flash`、
@@ -102,12 +115,14 @@ Gemini 流没有 `[DONE]` 哨兵。`finish()` 只有在收到候选的 `finishRe
 
 | Provider | Files | Batches | Embeddings |
 | --- | --- | --- | --- |
-| OpenAI | `POST/GET/DELETE /files`、`GET /files/{id}/content` | `POST/GET /batches`、`POST /batches/{id}/cancel` | `POST /embeddings` |
-| Anthropic | `POST/GET/DELETE /v1/files`、`GET /v1/files/{id}/content` | `{messages_path}/batches`（含 cancel / results） | — |
-| Gemini | — | — | `POST /models/{model}:embedContent`、`:batchEmbedContents` |
+| OpenAI | `POST/GET/DELETE /files`（`order` / `expires_after`）、`GET /files/{id}/content` | `POST/GET /batches`、`POST /batches/{id}/cancel`（含 `output_expires_after` / usage） | `POST /embeddings`（float / base64 两种响应） |
+| Anthropic | `POST/GET/DELETE /v1/files`、`GET /v1/files/{id}/content`；列表用 `page` + `next_page` + `ids` | `{messages_path}/batches`（create / retrieve / list / cancel / results / **delete**） | — |
+| Gemini | — | — | `POST /models/{model}:embedContent`、`:batchEmbedContents`（兼容 `embedding` 与 `embeddings[]`） |
 
-上传使用 `multipart/form-data`；未知字段通过 `extensions` 保留。Gemini Files / Batches
-尚未封装，可用 `execute(HttpRequest)` 或原生 `Endpoint` 扩展。
+上传使用 `multipart/form-data`；未知字段通过 `extensions` 保留。Anthropic 批量结果可用
+`results_typed()` 逐行解析，原始 `results()` 仍返回 bytes。Gemini Files / Batches
+尚未封装，可用 `execute(HttpRequest)` 或原生 `Endpoint` 扩展；Gemini `cachedContents`
+CRUD 已封装（见上节）。OpenAI `POST /moderations` 已实现。
 
 ## 结构化输出与流式
 
@@ -118,7 +133,7 @@ Gemini 流没有 `[DONE]` 哨兵。`finish()` 只有在收到候选的 `finishRe
 | OpenAI Chat | `response_format`（`text` / `json_object` / `json_schema`） | `parse_as::<T>()` | 支持；JSON 文本随 delta 到达 |
 | OpenAI Responses | `text.format`（`text` / `json_object` / `json_schema`） | `parse_as::<T>()` → `output_text()` | 支持；`response.output_text.delta` |
 | Anthropic Messages | `output_config.format`（`json_schema`） | `parse_as::<T>()` | 支持；需累积完整文本后反序列化 |
-| Gemini generateContent | `responseMimeType=application/json` + `responseSchema` / `responseJsonSchema` | `parse_as::<T>()` | 支持；每个增量是部分文本 |
+| Gemini generateContent | `responseMimeType=application/json` + `responseJsonSchema`（`responseSchema` 兼容但已 deprecated） | `parse_as::<T>()` | 支持；每个增量是部分文本 |
 
 airx 不在客户端拦截 `stream` 与结构化输出参数的组合；Provider 不接受该组合时按普通
 `ProviderError` 返回。
@@ -132,16 +147,16 @@ let request = ChatCompletionRequest::builder()
     .response_format(ResponseFormat::JsonObject) // 或 JsonSchema
     .build()?;
 
-let text = client.chat().stream(request).await?.final_text().await?;
-let parsed = serde_json::from_str::<MyPoster>(&text)
-    .map_err(|error| AirxError::Deserialization(error.into()))?;
+// final_parsed 只做 serde 解析，不注入/校验 schema
+let parsed: MyPoster = client.chat().stream(request).await?.final_parsed().await?;
 ```
 
 `final_text()` / `final_response()` 内部驱动各协议的 Accumulator，只在协议完成信号到达时
 返回成功（Chat `[DONE]`、Responses `response.completed`、Messages `message_stop`、
-Gemini `finishReason`）；截断或 EOF 提前返回 `AirxError::Stream(Incomplete)`。
-需要边收边展示时，自行累积文本 delta，或用 `airx_core::stream::JsonAccumulator`
-判断结构是否闭合（它只做完整性判断，不做部分反序列化）。
+Gemini 终态 `finishReason`）；截断或 EOF 提前返回 `AirxError::Stream(Incomplete)`。
+`ProtocolStream::final_parsed::<T>()` 是等价的收尾 + serde 便捷方法；需要边收边展示时，
+自行累积文本 delta，或用 `airx_core::stream::JsonAccumulator` 判断结构是否闭合
+（它只做完整性判断，不做部分反序列化）。
 
 `parse_as::<T>()` 只用于非流式：它把完整响应文本交给 serde，不设置参数、不校验 schema、
 不重试。
@@ -150,9 +165,9 @@ Gemini `finishReason`）；截断或 EOF 提前返回 `AirxError::Stream(Incompl
 
 | Provider | 端点 | 分页 |
 | --- | --- | --- |
-| OpenAI | `GET /models` / `GET /models/{model}` | 无分页 |
-| Anthropic | `GET /v1/models` / `GET /v1/models/{id}` | `limit` + `after_id` / `before_id`；`list_all()` 自动翻页 |
-| Gemini | `GET /models` / `GET /models/{model}` | `pageSize` + `pageToken`；`list_all()` 自动翻页 |
+| OpenAI | `GET /models` / `GET /models/{model}` / `DELETE /models/{model}` | 无分页 |
+| Anthropic | `GET /v1/models` / `GET /v1/models/{id}` | `limit` + `after_id` / `before_id` + `lifecycle[]`；`list_all()` 自动翻页 |
+| Gemini | `GET /models` / `GET /models/{model}` | `pageSize` + `pageToken`（百分号编码）；`list_all()` 自动翻页 |
 
 未知字段通过 `extensions` 保留。
 
@@ -206,13 +221,16 @@ DeepSeek 的服务端工具（`deepseek_web_search` / `deepseek_read_url`）通�
   - Chat：未收到 `[DONE]` → `Incomplete`
   - Responses：未收到 `response.completed` → `Incomplete`；`response.failed` / `error` → `Failed`
   - Messages：未收到 `message_stop` → `Incomplete`；`error` 事件 → `Failed`
-  - Gemini：未收到 `finishReason` / `blockReason` → `Incomplete`；SSE 内错误对象 → `Err`
+  - Gemini：未收到终态 `finishReason` / `blockReason` → `Incomplete`；`CONTINUATION` 视为未完成；
+    容忍 `[DONE]` 帧；SSE 内错误对象 → `Err`
+- 三家都提供部分结果收尾（`finish_partial()` / `final_response_partial()`），流内失败时可取已累积内容；
+  严格 `finish()` 语义不变。
 
 ## 对齐来源
 
 | Provider | 来源 |
 | --- | --- |
-| Anthropic | `anthropic-sdk-python`：`Messages.create` 签名与 `message_create_params.py`、`output_config_param.py`、`thinking_config_*` |
-| OpenAI | `openai-python`：Chat Completions 参数与 docstring（`max_tokens` 弃用说明、`reasoning_effort` 取值、`verbosity`） |
-| Gemini | Google AI for Developers：`generateContent` / `streamGenerateContent` REST 参考、`GenerationConfig`、`FunctionDeclaration` / `FunctionCallingConfig`、`GenerationConfig.thinkingConfig` |
+| Anthropic | `@anthropic-ai/sdk@1.13.0`（TypeScript）：`messages.create` / `countTokens` 参数与 `output_config` / `thinking` 类型；官方 `platform.claude.com` markdown 快照 |
+| OpenAI | `openai@7.63.0`：Chat Completions、Responses、Files/Batches/Embeddings/Moderations 类型；官方 `developers.openai.com` markdown 快照 |
+| Gemini | `@google/genai@3.6.1`：`GenerateContentConfig`、`Part`、`Tool` / `ToolConfig`、`EmbedContent*`、`CachedContent*`；官方 `aistudio.google.com` markdown 快照 |
 | DeepSeek | DeepSeek API Docs：JSON mode 指南、Chat Completions 与 Anthropic 兼容端点 |

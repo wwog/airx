@@ -1,0 +1,60 @@
+{
+  "model": "models/gemini-3-pro-preview",
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{ "text": "What is the weather in Singapore?" }]
+    },
+    {
+      "role": "model",
+      "parts": [
+        {
+          "functionCall": {
+            "id": "call-1",
+            "name": "get_weather",
+            "args": { "city": "Singapore" }
+          },
+          "thoughtSignature": "Signature A"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "parts": [
+        {
+          "inlineData": {
+            "mimeType": "video/mp4",
+            "data": "AAAAIGZ0eXBpc29t",
+            "displayName": "clip.mp4"
+          },
+          "videoMetadata": {
+            "startOffset": "1s",
+            "endOffset": "5s",
+            "fps": 2.0
+          },
+          "mediaResolution": "MEDIA_RESOLUTION_LOW"
+        }
+      ]
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "VALIDATED",
+      "allowedFunctionNames": ["get_weather"]
+    },
+    "includeServerSideToolInvocations": true
+  },
+  "generationConfig": {
+    "responseLogprobs": true,
+    "logprobs": 3,
+    "speechConfig": {
+      "voiceConfig": { "prebuiltVoiceConfig": { "voiceName": "Aoede" } },
+      "languageCode": "en-US"
+    },
+    "imageConfig": { "aspectRatio": "16:9", "imageSize": "2K" }
+  },
+  "serviceTier": "priority",
+  "store": true,
+  "labels": { "safety_identifier": "user-42" },
+  "continuationToken": "continuation-1"
+}

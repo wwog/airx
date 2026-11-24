@@ -7,10 +7,11 @@ use serde_json::Value;
 use crate::anthropic::common::Usage;
 
 use super::message::ContentBlock;
-use super::response::MessagesResponse;
+use super::response::{Container, MessagesResponse};
 
 /// Messages 流事件。
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum MessagesEvent {
     /// `message_start`
     MessageStart(MessageStart),
@@ -102,6 +103,7 @@ pub struct ContentBlockDelta {
 /// 内容块增量。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum Delta {
     /// 文本增量。
     Text(TextDelta),
@@ -111,6 +113,8 @@ pub enum Delta {
     Thinking(ThinkingDelta),
     /// 签名增量。
     Signature(SignatureDelta),
+    /// 引用增量。
+    Citations(CitationsDelta),
     /// 未识别增量。
     Other(Value),
 }
@@ -147,6 +151,15 @@ pub struct SignatureDelta {
     pub signature: String,
 }
 
+/// 引用增量（`citations_delta`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename = "citations_delta")]
+pub struct CitationsDelta {
+    /// 单条引用（`char_location` / `page_location` / `content_block_location`
+    /// / `web_search_result_location` / `search_result_location`）。
+    pub citation: Value,
+}
+
 /// `content_block_stop`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContentBlockStop {
@@ -162,7 +175,7 @@ pub struct ContentBlockStop {
 pub struct MessageDeltaEvent {
     /// 增量。
     pub delta: MessageDelta,
-    /// 用量增量。
+    /// 用量增量（累计值）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
     /// 未识别的扩展字段。
@@ -171,7 +184,10 @@ pub struct MessageDeltaEvent {
 }
 
 /// message 级增量。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// 官方还带 `container` 与 `stop_details`；两者曾在这一层被丢弃，导致流式路径无法
+/// 识别 refusal 细类与容器续跑信息。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MessageDelta {
     /// 停止原因。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -179,6 +195,15 @@ pub struct MessageDelta {
     /// 命中的停止序列。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_sequence: Option<String>,
+    /// 停止详情（refusal 分类）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_details: Option<super::response::RefusalStopDetails>,
+    /// 容器信息（使用容器类工具时非空）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<Container>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
 }
 
 /// `message_stop`。
@@ -264,5 +289,71 @@ mod tests {
         }))
         .expect("unknown");
         assert!(matches!(unknown, MessagesEvent::Unknown(_)));
+    }
+
+    #[test]
+    fn citations_delta_is_typed() {
+        let event: MessagesEvent = serde_json::from_value(json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "citations_delta",
+                "citation": {"type": "char_location", "cited_text": "hi", "start_char_index": 0}
+            }
+        }))
+        .expect("event");
+
+        match event {
+            MessagesEvent::ContentBlockDelta(event) => match event.delta {
+                Delta::Citations(delta) => {
+                    assert_eq!(delta.citation["cited_text"], "hi");
+                }
+                other => panic!("unexpected delta: {other:?}"),
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_delta_keeps_container_and_stop_details() {
+        let event: MessagesEvent = serde_json::from_value(json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": "refusal",
+                "stop_sequence": null,
+                "stop_details": {"type": "refusal", "category": "bio"},
+                "container": {"id": "container_1", "expires_at": "2026-11-24T00:00:00Z"}
+            },
+            "usage": {"output_tokens": 3, "input_tokens": null}
+        }))
+        .expect("event");
+
+        match &event {
+            MessagesEvent::MessageDelta(delta) => {
+                assert_eq!(delta.delta.stop_reason.as_deref(), Some("refusal"));
+                assert_eq!(
+                    delta
+                        .delta
+                        .stop_details
+                        .as_ref()
+                        .and_then(|details| details.category.as_deref()),
+                    Some("bio")
+                );
+                assert_eq!(
+                    delta
+                        .delta
+                        .container
+                        .as_ref()
+                        .and_then(|container| container.id.as_deref()),
+                    Some("container_1")
+                );
+                assert_eq!(delta.usage.as_ref().and_then(|u| u.input_tokens), None);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let value = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(value["delta"]["stop_details"]["category"], "bio");
+        assert_eq!(value["delta"]["container"]["id"], "container_1");
     }
 }

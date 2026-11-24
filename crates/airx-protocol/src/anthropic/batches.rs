@@ -11,9 +11,9 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::anthropic::common::error_from_response;
+use crate::anthropic::common::{AnthropicErrorResponse, error_from_response};
 use crate::anthropic::config::AnthropicConfig;
-use crate::anthropic::messages::MessagesRequest;
+use crate::anthropic::messages::{MessagesRequest, MessagesResponse};
 use crate::endpoint::Endpoint;
 
 /// 单个批处理请求。
@@ -111,6 +111,51 @@ pub struct ListBatchesRequest {
     /// 从该 ID 之前开始。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_id: Option<String>,
+}
+
+/// 结果行（JSONL 的一行）。
+///
+/// 官方 `.jsonl` 每行是 `{custom_id, result}`，`result.type` 决定载荷形状。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchResultLine {
+    /// 调用方自定义 ID（结果顺序不保证与请求一致）。
+    pub custom_id: String,
+    /// 处理结果。
+    pub result: BatchResult,
+}
+
+/// 单条批处理结果。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BatchResult {
+    /// 成功（含完整 Messages 响应）。
+    Succeeded {
+        /// Messages 响应（boxed：避免批处理结果枚举整体过大）。
+        message: Box<MessagesResponse>,
+    },
+    /// 失败（官方 `Shared.ErrorResponse` 信封：`{type:"error", error:{...}, request_id}`）。
+    Errored {
+        /// 错误信封。
+        error: AnthropicErrorResponse,
+    },
+    /// 被取消。
+    Canceled,
+    /// 已过期。
+    Expired,
+}
+
+/// 批处理删除结果。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeletedBatch {
+    /// 批处理 ID。
+    pub id: String,
+    /// 对象类型（`message_batch_deleted`）。
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
 }
 
 /// `POST {messages_path}/batches`。
@@ -293,6 +338,102 @@ impl Endpoint for BatchResultsEndpoint {
     }
 }
 
+/// `DELETE {messages_path}/batches/{id}`。
+#[derive(Debug, Clone)]
+pub struct DeleteBatchEndpoint {
+    config: AnthropicConfig,
+}
+
+impl DeleteBatchEndpoint {
+    /// 创建端点。
+    pub fn new(config: AnthropicConfig) -> Self {
+        Self { config }
+    }
+
+    fn uri(&self, id: &str) -> Result<airx_core::http::Uri, AirxError> {
+        self.config.resolve_path(
+            &format!("{}/{}", batch_path(&self.config), batch_id(id)?),
+            "batches",
+        )
+    }
+}
+
+impl Endpoint for DeleteBatchEndpoint {
+    type Request = String;
+    type Response = DeletedBatch;
+
+    fn encode(&self, request: &String) -> Result<HttpRequest, AirxError> {
+        let mut http = HttpRequest::new(airx_core::http::Method::DELETE, self.uri(request)?);
+        self.config.apply_headers(&mut http)?;
+        Ok(http)
+    }
+
+    fn decode(&self, response: HttpResponse) -> Result<DeletedBatch, AirxError> {
+        decode(response)
+    }
+}
+
+/// 类型化结果端点（逐行解析 JSONL）。
+#[derive(Debug, Clone)]
+pub struct BatchResultsTypedEndpoint {
+    config: AnthropicConfig,
+}
+
+impl BatchResultsTypedEndpoint {
+    /// 创建端点。
+    pub fn new(config: AnthropicConfig) -> Self {
+        Self { config }
+    }
+
+    fn uri(&self, id: &str) -> Result<airx_core::http::Uri, AirxError> {
+        self.config.resolve_path(
+            &format!("{}/{}/results", batch_path(&self.config), batch_id(id)?),
+            "batches",
+        )
+    }
+}
+
+impl Endpoint for BatchResultsTypedEndpoint {
+    type Request = String;
+    type Response = Vec<BatchResultLine>;
+
+    fn encode(&self, request: &String) -> Result<HttpRequest, AirxError> {
+        let mut http = HttpRequest::get(self.uri(request)?);
+        self.config.apply_headers(&mut http)?;
+        Ok(http)
+    }
+
+    fn decode(&self, response: HttpResponse) -> Result<Vec<BatchResultLine>, AirxError> {
+        if !response.status.is_success() {
+            return Err(error_from_response(
+                &ProviderId::anthropic(),
+                response.status,
+                &response.headers,
+                &response.body,
+            ));
+        }
+        parse_result_lines(&response.body)
+    }
+}
+
+/// 逐行解析批次结果 JSONL（空行忽略）。
+pub fn parse_result_lines(body: &[u8]) -> Result<Vec<BatchResultLine>, AirxError> {
+    let text = std::str::from_utf8(body).map_err(|error| {
+        AirxError::Deserialization(DeserializationError::new(error.to_string()))
+    })?;
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        lines.push(
+            serde_json::from_str::<BatchResultLine>(line)
+                .map_err(|error| AirxError::Deserialization(DeserializationError::from(error)))?,
+        );
+    }
+    Ok(lines)
+}
+
 fn batch_path(config: &AnthropicConfig) -> String {
     format!("{}/batches", config.messages_path().trim_end_matches('/'))
 }
@@ -368,5 +509,53 @@ mod tests {
         }))
         .expect("batch");
         assert_eq!(batch.id, "msgbatch_1");
+    }
+
+    #[test]
+    fn delete_endpoint_uses_delete_method_and_path() {
+        let endpoint = DeleteBatchEndpoint::new(AnthropicConfig::new("key"));
+        let http = endpoint.encode(&"msgbatch_1".to_owned()).expect("encode");
+        assert_eq!(http.method, airx_core::http::Method::DELETE);
+        assert_eq!(http.uri.path(), "/v1/messages/batches/msgbatch_1");
+
+        let deleted = endpoint
+            .decode(HttpResponse::new(
+                airx_core::http::StatusCode::OK,
+                airx_core::http::HeaderMap::new(),
+                br#"{"id":"msgbatch_1","type":"message_batch_deleted"}"#.as_slice(),
+            ))
+            .expect("decode");
+        assert_eq!(deleted.id, "msgbatch_1");
+        assert_eq!(deleted.kind.as_deref(), Some("message_batch_deleted"));
+    }
+
+    #[test]
+    fn typed_results_parse_jsonl() {
+        let body = concat!(
+            r#"{"custom_id":"1","result":{"type":"succeeded","message":{"id":"msg_1","model":"claude","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}}}"#,
+            "\n",
+            r#"{"custom_id":"2","result":{"type":"errored","error":{"type":"error","error":{"type":"invalid_request_error","message":"bad","details":{"error_code":"request_too_large"}},"request_id":"req_1"}}}"#,
+            "\n",
+            r#"{"custom_id":"3","result":{"type":"canceled"}}"#,
+            "\n",
+            r#"{"custom_id":"4","result":{"type":"expired"}}"#,
+            "\n"
+        );
+
+        let lines = parse_result_lines(body.as_bytes()).expect("lines");
+        assert_eq!(lines.len(), 4);
+        match &lines[0].result {
+            BatchResult::Succeeded { message } => assert_eq!(message.text(), "ok"),
+            other => panic!("unexpected: {other:?}"),
+        }
+        match &lines[1].result {
+            BatchResult::Errored { error } => {
+                assert_eq!(error.error.code().as_deref(), Some("request_too_large"));
+                assert_eq!(error.request_id.as_deref(), Some("req_1"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert_eq!(lines[2].result, BatchResult::Canceled);
+        assert_eq!(lines[3].result, BatchResult::Expired);
     }
 }

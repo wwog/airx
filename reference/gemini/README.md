@@ -2,6 +2,7 @@
 
 本目录是 Gemini 的**离线行为参照**：官方文档 markdown 快照、官方 npm SDK 的裁剪副本、
 以及由 SDK 类型声明静态生成的 API 清单。它不参与 Cargo 构建，也不是运行时依赖。
+与 airx 实现的逐项差距见 [`GAP.md`](GAP.md)。
 约定见上级 [`../README.md`](../README.md)。
 
 **入库范围**：仓库里**只提交脚本与本 README**（`README.md`、`update.sh`、`versions.env`、`scripts/*`）。

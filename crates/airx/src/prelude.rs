@@ -24,9 +24,16 @@ pub use airx_protocol::anthropic::batches::{
     ListBatchesRequest as AnthropicListBatchesRequest, MessageBatch,
 };
 #[cfg(feature = "anthropic")]
+pub use airx_protocol::anthropic::batches::{BatchResultLine, DeletedBatch};
+#[cfg(feature = "anthropic")]
 pub use airx_protocol::anthropic::files::{
     FileDeleteResponse as AnthropicFileDeleteResponse, FileList as AnthropicFileList, FileMetadata,
     ListFilesRequest as AnthropicListFilesRequest,
+};
+#[cfg(feature = "anthropic")]
+pub use airx_protocol::anthropic::messages::{
+    CacheControl, CacheKind, CacheTtl, ContentBlock, DocumentBlock, DocumentSource, StopReason,
+    SystemPrompt, TextBlock, Tool as AnthropicTool, ToolChoice as AnthropicToolChoice,
 };
 #[cfg(feature = "anthropic")]
 pub use airx_protocol::anthropic::messages::{
@@ -35,8 +42,19 @@ pub use airx_protocol::anthropic::messages::{
     ThinkingDisplay,
 };
 #[cfg(feature = "anthropic")]
+pub use airx_protocol::anthropic::models::ModelLifecycle;
+#[cfg(feature = "anthropic")]
 pub use airx_protocol::anthropic::models::{
     ListModelsRequest as AnthropicListModelsRequest, Model as AnthropicModel,
+};
+#[cfg(feature = "anthropic")]
+pub use airx_protocol::anthropic::{
+    AuthScheme as AnthropicAuthScheme, ServiceTier as AnthropicServiceTier, Usage,
+};
+#[cfg(feature = "gemini")]
+pub use airx_protocol::gemini::caches::{
+    CachedContent, CachedContentDelete, CachedContentList, CreateCachedContentRequest,
+    ListCachedContentsRequest, UpdateCachedContentRequest,
 };
 #[cfg(feature = "gemini")]
 pub use airx_protocol::gemini::embeddings::{
@@ -45,10 +63,12 @@ pub use airx_protocol::gemini::embeddings::{
 };
 #[cfg(feature = "gemini")]
 pub use airx_protocol::gemini::generate_content::{
-    Candidate, Content, FunctionCallPart, FunctionCallingConfig, FunctionCallingMode,
-    FunctionDeclaration, GenerateContentRequest, GenerateContentResponse,
-    GenerateContentStreamAccumulator, GenerationConfig, Part, PromptFeedback, Role as GeminiRole,
-    SafetySetting, ThinkingConfig as GeminiThinkingConfig, Tool as GeminiTool, ToolConfig,
+    AudioTranscriptionConfig, Candidate, Content, FinishReason, FunctionCallPart,
+    FunctionCallingConfig, FunctionCallingMode, FunctionDeclaration, FunctionResponseMedia,
+    GenerateContentRequest, GenerateContentResponse, GenerateContentStreamAccumulator,
+    GenerationConfig, ImageConfig, Part, PromptFeedback, Role as GeminiRole, SafetySetting,
+    ServiceTier as GeminiServiceTier, SpeechConfig, ThinkingConfig as GeminiThinkingConfig,
+    Tool as GeminiTool, ToolConfig, TranslationConfig, VideoMetadata,
 };
 #[cfg(feature = "gemini")]
 pub use airx_protocol::gemini::generate_content::{
@@ -57,36 +77,48 @@ pub use airx_protocol::gemini::generate_content::{
 };
 #[cfg(feature = "gemini")]
 pub use airx_protocol::gemini::models::{
-    ListModelsRequest as GeminiListModelsRequest, Model as GeminiModel,
+    ComputeTokensRequest, ComputeTokensResponse, ListModelsRequest as GeminiListModelsRequest,
+    Model as GeminiModel, TokensInfo,
 };
 #[cfg(feature = "gemini")]
 pub use airx_protocol::gemini::{SafetyRating, UsageMetadata};
 #[cfg(feature = "openai")]
 pub use airx_protocol::openai::batches::{
-    BatchList, BatchObject, CreateBatchRequest, ListBatchesRequest,
+    BatchList, BatchObject, BatchUsage, CreateBatchRequest, ListBatchesRequest,
 };
 #[cfg(all(feature = "openai", feature = "stream"))]
 pub use airx_protocol::openai::chat::ChatStreamAccumulator;
 #[cfg(feature = "openai")]
 pub use airx_protocol::openai::chat::{
-    ChatCompletionRequest, ChatCompletionResponse, ChatMessage, ChatStreamEvent, Tool, ToolCall,
-    ToolChoice,
+    ChatCompletionChunk, ChatCompletionListRequest, ChatCompletionRequest, ChatCompletionResponse,
+    ChatCompletionUpdateRequest, ChatMessage, ChatStreamEvent, ContentPart, CustomToolCall,
+    FilePart, InputAudio, JsonSchemaSpec, PromptCacheOptions, ResponseFormat, StreamOptions, Tool,
+    ToolCall, ToolChoice,
 };
 #[cfg(feature = "openai")]
 pub use airx_protocol::openai::common::{ReasoningEffort, Verbosity};
 #[cfg(feature = "openai")]
-pub use airx_protocol::openai::embeddings::{EmbeddingRequest, EmbeddingResponse};
+pub use airx_protocol::openai::embeddings::{EmbeddingRequest, EmbeddingResponse, EmbeddingVector};
 #[cfg(feature = "openai")]
 pub use airx_protocol::openai::files::{
-    FileDeleteResponse, FileList, FileObject, ListFilesRequest, UploadFileRequest,
+    ExpiresAfter, FileDeleteResponse, FileList, FileObject, ListFilesRequest, UploadFileRequest,
 };
 #[cfg(feature = "openai")]
-pub use airx_protocol::openai::models::{Model as OpenAiModel, ModelList as OpenAiModelList};
+pub use airx_protocol::openai::models::{
+    Model as OpenAiModel, ModelDeleted, ModelList as OpenAiModelList,
+};
+#[cfg(feature = "openai")]
+pub use airx_protocol::openai::moderations::{ModerationRequest, ModerationResponse};
+#[cfg(feature = "openai")]
+pub use airx_protocol::openai::responses::PromptCacheOptions as ResponsesPromptCacheOptions;
 #[cfg(feature = "openai")]
 pub use airx_protocol::openai::responses::{
-    InputContent, InputItem, InputItemList, InputMessageContent, InputTokensCount,
-    InputTokensCountRequest, ListInputItemsRequest, ReasoningSummary, ResponsesEvent,
-    ResponsesRequest, ResponsesResponse, ResponsesStreamAccumulator, TextFormat,
+    Annotation, CompactRequest, ContextManagement, InputContent, InputItem, InputItemList,
+    InputMessageContent, InputTokensCount, InputTokensCountRequest, ListInputItemsRequest,
+    OutputContent, OutputItem, Prompt, PromptCacheDiagnostics, ReasoningSummary, ResponsesEvent,
+    ResponsesFunctionTool, ResponsesRequest, ResponsesResponse, ResponsesStreamAccumulator,
+    ResponsesStreamOptions, ResponsesTool, ResponsesToolChoice, RetrieveResponseOptions,
+    TextConfig, TextFormat, ToolUsage,
 };
 pub use airx_transport::RetryPolicy;
 
@@ -96,7 +128,7 @@ pub use crate::ProtocolStream;
 pub use crate::{Anthropic, AnthropicBatches, AnthropicBuilder, AnthropicFiles, AnthropicModels};
 pub use crate::{ApiClient, Client, ClientBuilder};
 #[cfg(feature = "gemini")]
-pub use crate::{Gemini, GeminiBuilder, GeminiEmbeddings, GeminiModels};
+pub use crate::{Gemini, GeminiBuilder, GeminiCaches, GeminiEmbeddings, GeminiModels};
 #[cfg(feature = "openai")]
 pub use crate::{
     OpenAi, OpenAiBatches, OpenAiBuilder, OpenAiEmbeddings, OpenAiFiles, OpenAiModels,

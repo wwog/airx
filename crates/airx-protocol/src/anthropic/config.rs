@@ -13,12 +13,31 @@ pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// 默认 Messages 路径。
 pub const DEFAULT_MESSAGES_PATH: &str = "/v1/messages";
 /// 默认 API 版本。
-pub const DEFAULT_API_VERSION: &str = "2023-06-01";
+///
+/// 官方当前版本为 `2026-10-21`；`output_config`、`thinking.display`、
+/// `stop_reason=refusal` 等字段只在该版本面生效。兼容网关未必接受该值，
+/// 接入网关时用 [`AnthropicConfig::with_api_version`] 显式固定。
+pub const DEFAULT_API_VERSION: &str = "2026-10-21";
+
+/// 认证方式。
+///
+/// 官方仍支持 `x-api-key`（`Authorization` 的 legacy fallback），
+/// OAuth / WIF 短期 token 走 `Authorization: Bearer`。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuthScheme {
+    /// `x-api-key: <key>`（默认）。
+    #[default]
+    ApiKey,
+    /// `Authorization: Bearer <token>`。
+    Bearer,
+}
 
 /// Anthropic 配置。
 #[derive(Clone)]
 pub struct AnthropicConfig {
-    pub(crate) api_key: String,
+    pub(crate) credential: String,
+    pub(crate) auth: AuthScheme,
     pub(crate) base_url: String,
     pub(crate) messages_path: String,
     pub(crate) api_version: String,
@@ -29,7 +48,8 @@ impl AnthropicConfig {
     /// 使用官方地址、默认路径与默认版本创建配置。
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            api_key: api_key.into(),
+            credential: api_key.into(),
+            auth: AuthScheme::ApiKey,
             base_url: DEFAULT_BASE_URL.to_owned(),
             messages_path: DEFAULT_MESSAGES_PATH.to_owned(),
             api_version: DEFAULT_API_VERSION.to_owned(),
@@ -71,6 +91,23 @@ impl AnthropicConfig {
         self
     }
 
+    /// 切换认证方式。
+    #[must_use]
+    pub fn with_auth_scheme(mut self, scheme: AuthScheme) -> Self {
+        self.auth = scheme;
+        self
+    }
+
+    /// 使用 `Authorization: Bearer <token>`（OAuth / WIF 短期 token）。
+    ///
+    /// 该模式下不再发送 `x-api-key`。
+    #[must_use]
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.credential = token.into();
+        self.auth = AuthScheme::Bearer;
+        self
+    }
+
     /// 追加 Provider 级默认 Header（例如 beta Header）。
     #[must_use]
     pub fn with_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
@@ -91,6 +128,11 @@ impl AnthropicConfig {
     /// API 版本。
     pub fn api_version(&self) -> &str {
         &self.api_version
+    }
+
+    /// 当前认证方式。
+    pub fn auth_scheme(&self) -> AuthScheme {
+        self.auth
     }
 
     /// 默认 Header。
@@ -115,10 +157,21 @@ impl AnthropicConfig {
 
     /// 写入认证、版本与 Provider 级默认 Header。
     pub(crate) fn apply_headers(&self, http: &mut HttpRequest) -> Result<(), AirxError> {
-        http.headers.insert(
-            HeaderName::from_static("x-api-key"),
-            header_value(&self.api_key, "api_key")?,
-        );
+        match self.auth {
+            AuthScheme::ApiKey => {
+                http.headers.insert(
+                    HeaderName::from_static("x-api-key"),
+                    header_value(&self.credential, "api_key")?,
+                );
+            }
+            AuthScheme::Bearer => {
+                let value = format!("Bearer {}", self.credential);
+                http.headers.insert(
+                    HeaderName::from_static("authorization"),
+                    header_value(&value, "token")?,
+                );
+            }
+        }
         http.headers.insert(
             HeaderName::from_static("anthropic-version"),
             header_value(&self.api_version, "api_version")?,
@@ -143,7 +196,8 @@ fn header_value(value: &str, field: &str) -> Result<HeaderValue, AirxError> {
 impl fmt::Debug for AnthropicConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AnthropicConfig")
-            .field("api_key", &"<redacted>")
+            .field("credential", &"<redacted>")
+            .field("auth", &self.auth)
             .field("base_url", &self.base_url)
             .field("messages_path", &self.messages_path)
             .field("api_version", &self.api_version)
@@ -181,6 +235,35 @@ mod tests {
             config.endpoint_uri().expect("uri").to_string(),
             "https://gateway.example.com/anthropic/messages"
         );
+    }
+
+    #[test]
+    fn default_version_is_current_official() {
+        assert_eq!(DEFAULT_API_VERSION, "2026-10-21");
+        let config = AnthropicConfig::new("sk-ant-test");
+        assert_eq!(config.api_version(), "2026-10-21");
+        assert_eq!(config.auth_scheme(), AuthScheme::ApiKey);
+    }
+
+    #[test]
+    fn bearer_auth_uses_authorization_header() {
+        let config = AnthropicConfig::new("oauth-token").with_bearer_token("oauth-token");
+        let mut http = HttpRequest::get("https://api.anthropic.com/v1/messages".parse().unwrap());
+        config.apply_headers(&mut http).expect("headers");
+
+        assert_eq!(http.headers["authorization"], "Bearer oauth-token");
+        assert!(!http.headers.contains_key("x-api-key"));
+        assert_eq!(http.headers["anthropic-version"], "2026-10-21");
+    }
+
+    #[test]
+    fn api_key_auth_stays_default() {
+        let config = AnthropicConfig::new("sk-ant-test");
+        let mut http = HttpRequest::get("https://api.anthropic.com/v1/messages".parse().unwrap());
+        config.apply_headers(&mut http).expect("headers");
+
+        assert_eq!(http.headers["x-api-key"], "sk-ant-test");
+        assert!(!http.headers.contains_key("authorization"));
     }
 
     #[test]

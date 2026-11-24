@@ -140,7 +140,7 @@ async fn tool_calling(client: &OpenAi, model: &str) -> Result<(), Box<dyn std::e
     println!(
         "tools: 模型调用 {} 次，第一个参数 = {}",
         calls.len(),
-        calls[0].function.arguments
+        calls[0].arguments().unwrap_or_default()
     );
 
     let second = ChatCompletionRequest::builder()

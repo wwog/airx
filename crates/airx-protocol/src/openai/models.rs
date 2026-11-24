@@ -30,6 +30,25 @@ pub struct Model {
     /// 所有方。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owned_by: Option<String>,
+    /// 下线日期（官方以日期字符串返回，未公布时为 null）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shutdown_date: Option<String>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 删除模型结果。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelDeleted {
+    /// 模型 ID。
+    pub id: String,
+    /// 对象类型。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+    /// 是否删除。
+    #[serde(default)]
+    pub deleted: bool,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -118,6 +137,39 @@ impl Endpoint for RetrieveModelEndpoint {
     }
 }
 
+/// `DELETE /models/{model}`（仅 fine-tuned 模型可删，需要 Owner 权限）。
+#[derive(Debug, Clone)]
+pub struct DeleteModelEndpoint {
+    config: OpenAiConfig,
+}
+
+impl DeleteModelEndpoint {
+    /// 创建端点。
+    pub fn new(config: OpenAiConfig) -> Self {
+        Self { config }
+    }
+
+    fn uri(&self, model: &ModelId) -> Result<Uri, AirxError> {
+        let path = format!("{MODELS_PATH}/{}", model_path(model)?);
+        self.config.endpoint_uri(&path, "model")
+    }
+}
+
+impl Endpoint for DeleteModelEndpoint {
+    type Request = ModelId;
+    type Response = ModelDeleted;
+
+    fn encode(&self, request: &ModelId) -> Result<HttpRequest, AirxError> {
+        let mut http = HttpRequest::new(airx_core::http::Method::DELETE, self.uri(request)?);
+        self.config.apply_headers(&mut http)?;
+        Ok(http)
+    }
+
+    fn decode(&self, response: HttpResponse) -> Result<ModelDeleted, AirxError> {
+        decode(response)
+    }
+}
+
 fn decode<T: for<'de> Deserialize<'de>>(response: HttpResponse) -> Result<T, AirxError> {
     if !response.status.is_success() {
         return Err(error_from_response(
@@ -171,6 +223,35 @@ mod tests {
         assert_eq!(list.data[0].id, "gpt-4o-mini");
         assert!(list.data[1].extensions.contains_key("futureField"));
         assert!(list.extensions.contains_key("futureTopField"));
+    }
+
+    #[test]
+    fn shutdown_date_and_delete_are_typed() {
+        let model: Model = serde_json::from_value(json!({
+            "id": "gpt-4o",
+            "object": "model",
+            "shutdown_date": "2026-12-01"
+        }))
+        .expect("model");
+        assert_eq!(model.shutdown_date.as_deref(), Some("2026-12-01"));
+
+        let deleted: ModelDeleted = serde_json::from_value(json!({
+            "id": "ft:gpt-4o-mini:org::abc",
+            "object": "model",
+            "deleted": true
+        }))
+        .expect("deleted");
+        assert!(deleted.deleted);
+    }
+
+    #[test]
+    fn delete_endpoint_uses_delete_method() {
+        let endpoint = DeleteModelEndpoint::new(OpenAiConfig::new("sk-test"));
+        let http = endpoint
+            .encode(&ModelId::new("ft:gpt-4o-mini"))
+            .expect("encode");
+        assert_eq!(http.method, airx_core::http::Method::DELETE);
+        assert_eq!(http.uri.path(), "/v1/models/ft:gpt-4o-mini");
     }
 
     #[test]

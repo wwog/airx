@@ -32,6 +32,78 @@ pub struct ResponsesUsage {
     pub extensions: Extensions,
 }
 
+/// Prompt 缓存诊断。
+///
+/// 官方取值：`cache_hit` / `cache_miss` / `comparison_response_not_found` /
+/// `unavailable`；`cache_miss` 额外带原因与受影响 token 数。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptCacheDiagnostics {
+    /// 诊断类型。
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// 未命中原因（仅 `cache_miss`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// 首次分歧后被影响的输入 token 估算值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_missed_tokens: Option<u64>,
+    /// 对比响应中可复用前缀的 token 数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison_reusable_tokens: Option<u64>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+impl PromptCacheDiagnostics {
+    /// 是否缓存命中。
+    pub fn is_hit(&self) -> bool {
+        self.kind == "cache_hit"
+    }
+}
+
+/// 服务端工具用量。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolUsage {
+    /// 图片生成用量。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_gen: Option<ToolUsageImageGen>,
+    /// 联网搜索用量。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<ToolUsageWebSearch>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 图片生成工具用量。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolUsageImageGen {
+    /// 输入 token。
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// 输出 token。
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// 输入明细（原样保留）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens_details: Option<Value>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 联网搜索工具用量。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolUsageWebSearch {
+    /// 计费搜索次数。
+    #[serde(default)]
+    pub num_requests: u64,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
 /// Responses 响应。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResponsesResponse {
@@ -43,6 +115,9 @@ pub struct ResponsesResponse {
     /// 创建时间。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<u64>,
+    /// 完成时间（仅 `completed` 时存在）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<u64>,
     /// 状态（`completed` / `in_progress` / `incomplete` / `failed`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
@@ -55,6 +130,12 @@ pub struct ResponsesResponse {
     /// 用量。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ResponsesUsage>,
+    /// Prompt 缓存诊断。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_diagnostics: Option<PromptCacheDiagnostics>,
+    /// 服务端工具用量。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_usage: Option<ToolUsage>,
     /// 不完整原因。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incomplete_details: Option<Value>,
@@ -81,6 +162,39 @@ impl ResponsesResponse {
         }
         text
     }
+
+    /// 响应状态（`completed` / `incomplete` / `failed` / `in_progress`）。
+    pub fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+
+    /// 是否已完成。
+    pub fn is_completed(&self) -> bool {
+        self.status() == Some("completed")
+    }
+
+    /// 是否未完成（`incomplete` 或 `failed`）。
+    pub fn is_incomplete(&self) -> bool {
+        matches!(self.status(), Some("incomplete" | "failed"))
+    }
+
+    /// 不完整原因（例如 `max_output_tokens` / `content_filter`）。
+    pub fn incomplete_reason(&self) -> Option<&str> {
+        self.incomplete_details
+            .as_ref()
+            .and_then(|details| details.get("reason"))
+            .and_then(serde_json::Value::as_str)
+    }
+
+    /// 是否因输出长度上限截断。
+    pub fn is_truncated(&self) -> bool {
+        self.incomplete_reason() == Some("max_output_tokens")
+    }
+
+    /// 是否因内容过滤被拦截。
+    pub fn is_blocked(&self) -> bool {
+        self.incomplete_reason() == Some("content_filter")
+    }
 }
 
 /// 输出 item。
@@ -90,6 +204,10 @@ pub enum OutputItem {
     Message(MessageItem),
     /// 函数调用。
     FunctionCall(FunctionCallItem),
+    /// custom 工具调用（`{"type":"custom_tool_call",...}`）。
+    CustomToolCall(CustomToolCallItem),
+    /// 压缩 item（`{"type":"compaction",...}`）。
+    Compaction(CompactionItem),
     /// reasoning item（需要原样回传以保持推理状态）。
     Reasoning(ReasoningItem),
     /// 服务端联网搜索调用（OpenAI 后台执行）。
@@ -287,6 +405,39 @@ pub struct FunctionCallItem {
     pub extensions: Extensions,
 }
 
+/// custom 工具调用 item。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomToolCallItem {
+    /// item ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// 调用 ID（回传给模型时使用）。
+    pub call_id: String,
+    /// 工具名。
+    pub name: String,
+    /// 模型生成的输入（free-form 字符串）。
+    pub input: String,
+    /// 状态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 压缩 item。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactionItem {
+    /// item ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// 压缩后的加密内容（回传给模型时原样保留）。
+    pub encrypted_content: String,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
 /// 服务端联网搜索调用。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WebSearchCallItem {
@@ -309,6 +460,12 @@ pub struct WebSearchCallItem {
 pub enum Annotation {
     /// URL 引用。
     UrlCitation(UrlCitation),
+    /// 文件引用。
+    FileCitation(FileCitation),
+    /// 容器文件引用。
+    ContainerFileCitation(ContainerFileCitation),
+    /// 文件路径。
+    FilePath(FilePath),
     /// 未识别标注。
     Other(Value),
 }
@@ -326,6 +483,54 @@ pub struct UrlCitation {
     /// 在文本中的结束位置。
     #[serde(default)]
     pub end_index: u32,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 文件引用。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileCitation {
+    /// 文件 ID。
+    pub file_id: String,
+    /// 文件名。
+    pub filename: String,
+    /// 插入位置。
+    #[serde(default)]
+    pub index: u32,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 容器文件引用。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContainerFileCitation {
+    /// 容器 ID。
+    pub container_id: String,
+    /// 文件 ID。
+    pub file_id: String,
+    /// 文件名。
+    pub filename: String,
+    /// 在文本中的起始位置。
+    #[serde(default)]
+    pub start_index: u32,
+    /// 在文本中的结束位置。
+    #[serde(default)]
+    pub end_index: u32,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 文件路径标注。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FilePath {
+    /// 文件 ID。
+    pub file_id: String,
+    /// 文件在列表中的位置。
+    #[serde(default)]
+    pub index: u32,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -375,6 +580,155 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod p2_field_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn response_diagnostics_tool_usage_and_completed_at_decode() {
+        let response: ResponsesResponse = serde_json::from_value(json!({
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 1,
+            "completed_at": 2,
+            "status": "completed",
+            "output": [],
+            "prompt_cache_diagnostics": {
+                "type": "cache_miss",
+                "reason": "input_changed",
+                "cache_missed_tokens": 120,
+                "comparison_reusable_tokens": 300
+            },
+            "tool_usage": {
+                "web_search": {"num_requests": 2},
+                "image_gen": {"input_tokens": 10, "output_tokens": 4}
+            }
+        }))
+        .expect("response");
+
+        assert_eq!(response.completed_at, Some(2));
+        let diagnostics = response
+            .prompt_cache_diagnostics
+            .as_ref()
+            .expect("diagnostics");
+        assert!(!diagnostics.is_hit());
+        assert_eq!(diagnostics.reason.as_deref(), Some("input_changed"));
+        assert_eq!(diagnostics.cache_missed_tokens, Some(120));
+        assert_eq!(diagnostics.comparison_reusable_tokens, Some(300));
+
+        let tool_usage = response.tool_usage.as_ref().expect("tool usage");
+        assert_eq!(
+            tool_usage
+                .web_search
+                .as_ref()
+                .map(|usage| usage.num_requests),
+            Some(2)
+        );
+        assert_eq!(
+            tool_usage
+                .image_gen
+                .as_ref()
+                .map(|usage| usage.output_tokens),
+            Some(4)
+        );
+
+        // 往返不丢字段。
+        let value = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(value["prompt_cache_diagnostics"]["type"], "cache_miss");
+        assert_eq!(value["tool_usage"]["web_search"]["num_requests"], 2);
+    }
+
+    #[test]
+    fn cache_hit_diagnostics_is_recognized() {
+        let diagnostics: PromptCacheDiagnostics =
+            serde_json::from_value(json!({"type": "cache_hit"})).expect("diagnostics");
+        assert!(diagnostics.is_hit());
+    }
+
+    #[test]
+    fn custom_tool_call_and_compaction_items_roundtrip() {
+        let json = json!({
+            "id": "resp_1",
+            "output": [
+                {
+                    "type": "custom_tool_call",
+                    "id": "ctc_1",
+                    "call_id": "call_1",
+                    "name": "shell",
+                    "input": "ls -la",
+                    "status": "completed"
+                },
+                {
+                    "type": "compaction",
+                    "id": "cmp_1",
+                    "encrypted_content": "cipher"
+                }
+            ]
+        });
+
+        let response: ResponsesResponse = serde_json::from_value(json.clone()).expect("response");
+        match &response.output[0] {
+            OutputItem::CustomToolCall(call) => {
+                assert_eq!(call.call_id, "call_1");
+                assert_eq!(call.name, "shell");
+                assert_eq!(call.input, "ls -la");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        match &response.output[1] {
+            OutputItem::Compaction(item) => {
+                assert_eq!(item.id.as_deref(), Some("cmp_1"));
+                assert_eq!(item.encrypted_content, "cipher");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        assert_eq!(serde_json::to_value(&response).expect("serialize"), json);
+    }
+
+    #[test]
+    fn all_annotation_kinds_roundtrip() {
+        let json = json!({
+            "type": "output_text",
+            "text": "cited",
+            "annotations": [
+                {
+                    "type": "file_citation",
+                    "file_id": "file-1",
+                    "filename": "a.pdf",
+                    "index": 3
+                },
+                {
+                    "type": "container_file_citation",
+                    "container_id": "c-1",
+                    "file_id": "file-2",
+                    "filename": "b.pdf",
+                    "start_index": 0,
+                    "end_index": 5
+                },
+                {
+                    "type": "file_path",
+                    "file_id": "file-3",
+                    "index": 1
+                }
+            ]
+        });
+
+        let content: OutputContent = serde_json::from_value(json.clone()).expect("content");
+        let OutputContent::OutputText(text) = &content else {
+            panic!("unexpected content");
+        };
+        assert!(matches!(text.annotations[0], Annotation::FileCitation(_)));
+        assert!(matches!(
+            text.annotations[1],
+            Annotation::ContainerFileCitation(_)
+        ));
+        assert!(matches!(text.annotations[2], Annotation::FilePath(_)));
+        assert_eq!(serde_json::to_value(&content).expect("serialize"), json);
     }
 }
 
@@ -438,6 +792,8 @@ impl Serialize for OutputItem {
         let (kind, value) = match self {
             Self::Message(item) => ("message", serde_json::to_value(item)),
             Self::FunctionCall(item) => ("function_call", serde_json::to_value(item)),
+            Self::CustomToolCall(item) => ("custom_tool_call", serde_json::to_value(item)),
+            Self::Compaction(item) => ("compaction", serde_json::to_value(item)),
             Self::Reasoning(item) => ("reasoning", serde_json::to_value(item)),
             Self::WebSearchCall(item) => ("web_search_call", serde_json::to_value(item)),
             Self::FileSearchCall(item) => ("file_search_call", serde_json::to_value(item)),
@@ -475,6 +831,8 @@ impl<'de> Deserialize<'de> for OutputItem {
         match kind.as_str() {
             "message" => parse!(MessageItem, Message),
             "function_call" => parse!(FunctionCallItem, FunctionCall),
+            "custom_tool_call" => parse!(CustomToolCallItem, CustomToolCall),
+            "compaction" => parse!(CompactionItem, Compaction),
             "reasoning" => parse!(ReasoningItem, Reasoning),
             "web_search_call" => parse!(WebSearchCallItem, WebSearchCall),
             "file_search_call" => parse!(FileSearchCallItem, FileSearchCall),
@@ -527,6 +885,11 @@ impl Serialize for Annotation {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let (kind, value) = match self {
             Self::UrlCitation(citation) => ("url_citation", serde_json::to_value(citation)),
+            Self::FileCitation(citation) => ("file_citation", serde_json::to_value(citation)),
+            Self::ContainerFileCitation(citation) => {
+                ("container_file_citation", serde_json::to_value(citation))
+            }
+            Self::FilePath(path) => ("file_path", serde_json::to_value(path)),
             Self::Other(value) => return value.serialize(serializer),
         };
         inject_type(kind, value, serializer)
@@ -542,13 +905,24 @@ impl<'de> Deserialize<'de> for Annotation {
             .unwrap_or_default()
             .to_owned();
 
-        if kind == "url_citation" {
-            remove_type(&mut value);
-            return serde_json::from_value::<UrlCitation>(value)
-                .map(Self::UrlCitation)
-                .map_err(serde::de::Error::custom);
+        macro_rules! parse {
+            ($ty:ty, $variant:ident) => {{
+                remove_type(&mut value);
+                return serde_json::from_value::<$ty>(value)
+                    .map(Self::$variant)
+                    .map_err(serde::de::Error::custom);
+            }};
         }
-        Ok(Self::Other(value))
+
+        match kind.as_str() {
+            "url_citation" => parse!(UrlCitation, UrlCitation),
+            "file_citation" => parse!(FileCitation, FileCitation),
+            "container_file_citation" => {
+                parse!(ContainerFileCitation, ContainerFileCitation)
+            }
+            "file_path" => parse!(FilePath, FilePath),
+            _ => Ok(Self::Other(value)),
+        }
     }
 }
 
