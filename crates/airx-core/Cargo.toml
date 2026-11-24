@@ -1,6 +1,7 @@
 [package]
 name = "airx-core"
 description = "airx 基础层：错误分类、模型标识、JSON 保真、SSE 语法与 HTTP 数据结构"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
