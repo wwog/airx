@@ -20,6 +20,9 @@
 依赖严格单向：`airx → {core, protocol, transport}`，`protocol/transport → core`。
 当前实现架构见 [docs/architecture.md](docs/architecture.md)，协议覆盖见
 [docs/protocol-support.md](docs/protocol-support.md)，兼容规则见 [docs/compatibility.md](docs/compatibility.md)。
+需要逐字段核对官方行为时，用 [reference/](reference/README.md) 下的本地快照：
+运行 `reference/<provider>/update.sh` 拉取官方文档与 npm SDK 并生成 API 清单
+（生成物不入库）。
 
 协议接入指南：
 

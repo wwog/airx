@@ -2,3 +2,11 @@
 .env
 .env.*
 !.env.example
+
+# reference/ 只有脚本与说明入库；文档、SDK、API 清单都是本地生成物
+/reference/**/raw/
+/reference/**/_tmp/
+/reference/**/*.tgz
+/reference/**/docs/
+/reference/**/sdk/
+/reference/**/api/
