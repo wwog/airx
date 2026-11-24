@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::endpoint::Endpoint;
 use crate::openai::common::error::error_from_response;
 use crate::openai::config::OpenAiConfig;
+use crate::openai::files::ExpiresAfter;
 
 /// 端点路径。
 pub const BATCHES_PATH: &str = "/batches";
@@ -71,12 +72,41 @@ pub struct BatchObject {
     /// 请求计数（结构随官方演进，原样保留）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_counts: Option<Value>,
+    /// 处理该批次的模型。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// 批次 token 用量（2025-09-07 之后创建的批次才有）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<BatchUsage>,
     /// 元数据。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
     /// 错误。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub errors: Option<Value>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// 批次 token 用量。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BatchUsage {
+    /// 输入 token。
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// 输入 token 明细（原样保留）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens_details: Option<Value>,
+    /// 输出 token。
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// 输出 token 明细（原样保留）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens_details: Option<Value>,
+    /// 总计。
+    #[serde(default)]
+    pub total_tokens: u64,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -94,6 +124,9 @@ pub struct CreateBatchRequest {
     /// 元数据。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    /// 输出 / 错误文件的过期策略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_expires_after: Option<ExpiresAfter>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -113,6 +146,7 @@ pub struct CreateBatchRequestBuilder {
     endpoint: Option<String>,
     completion_window: Option<String>,
     metadata: Option<Value>,
+    output_expires_after: Option<ExpiresAfter>,
     extensions: Extensions,
 }
 
@@ -145,6 +179,13 @@ impl CreateBatchRequestBuilder {
         self
     }
 
+    /// 设置输出 / 错误文件的过期策略。
+    #[must_use]
+    pub fn output_expires_after(mut self, expires_after: ExpiresAfter) -> Self {
+        self.output_expires_after = Some(expires_after);
+        self
+    }
+
     /// 添加扩展字段。
     #[must_use]
     pub fn extension(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
@@ -172,6 +213,7 @@ impl CreateBatchRequestBuilder {
             endpoint,
             completion_window,
             metadata: self.metadata,
+            output_expires_after: self.output_expires_after,
             extensions: self.extensions,
         })
     }
@@ -397,11 +439,18 @@ mod tests {
             "endpoint": "/v1/chat/completions",
             "input_file_id": "file-1",
             "status": "completed",
-            "request_counts": {"total": 1, "completed": 1, "failed": 0}
+            "model": "gpt-4o-mini",
+            "request_counts": {"total": 1, "completed": 1, "failed": 0},
+            "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
         }))
         .expect("batch");
         assert_eq!(batch.id, "batch_1");
         assert_eq!(batch.status.as_deref(), Some("completed"));
+        assert_eq!(batch.model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(
+            batch.usage.as_ref().map(|usage| usage.total_tokens),
+            Some(15)
+        );
     }
 
     #[test]
@@ -414,5 +463,19 @@ mod tests {
             .build()
             .expect("request");
         assert_eq!(request.completion_window, "24h");
+    }
+
+    #[test]
+    fn output_expires_after_serializes() {
+        let request = CreateBatchRequest::builder()
+            .input_file_id("file-1")
+            .endpoint("/v1/chat/completions")
+            .completion_window("24h")
+            .output_expires_after(ExpiresAfter::after_seconds(3600))
+            .build()
+            .expect("request");
+        let value = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(value["output_expires_after"]["anchor"], "created_at");
+        assert_eq!(value["output_expires_after"]["seconds"], 3600);
     }
 }

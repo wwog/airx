@@ -9,6 +9,12 @@ use airx_core::AirxError;
 use airx_core::http::{HttpRequest, HttpResponse};
 use airx_core::model::ModelId;
 use airx_protocol::gemini::GeminiConfig;
+use airx_protocol::gemini::caches::{
+    CachedContent, CachedContentDelete, CachedContentList, CreateCachedContentEndpoint,
+    CreateCachedContentRequest, DeleteCachedContentEndpoint, GetCachedContentEndpoint,
+    ListCachedContentsEndpoint, ListCachedContentsRequest, UpdateCachedContentEndpoint,
+    UpdateCachedContentRequest,
+};
 use airx_protocol::gemini::embeddings::{
     BatchEmbedContentsEndpoint, BatchEmbedContentsRequest, BatchEmbedContentsResponse,
     BatchEmbedItem, EmbedContentEndpoint, EmbedContentRequest, EmbedContentResponse,
@@ -18,7 +24,8 @@ use airx_protocol::gemini::generate_content::{
     GenerateContentRequest, GenerateContentResponse,
 };
 use airx_protocol::gemini::models::{
-    GetModelEndpoint, ListModelsEndpoint, ListModelsRequest, Model, ModelList,
+    ComputeTokensEndpoint, ComputeTokensRequest, ComputeTokensResponse, GetModelEndpoint,
+    ListModelsEndpoint, ListModelsRequest, Model, ModelList,
 };
 use serde::de::DeserializeOwned;
 
@@ -73,6 +80,15 @@ impl Gemini {
     /// Models API。
     pub fn models(&self) -> GeminiModels {
         GeminiModels {
+            executor: Arc::clone(&self.executor),
+            config: self.config.clone(),
+            options: RequestOptions::default(),
+        }
+    }
+
+    /// Caches API（`cachedContents` 的创建 / 读取 / 续期 / 删除）。
+    pub fn caches(&self) -> GeminiCaches {
+        GeminiCaches {
             executor: Arc::clone(&self.executor),
             config: self.config.clone(),
             options: RequestOptions::default(),
@@ -210,6 +226,24 @@ impl GeminiModels {
         api.create_with(&model, &self.options).await
     }
 
+    /// 获取单个模型（与其它 Provider 的 `retrieve` 命名对齐）。
+    pub async fn retrieve(&self, model: impl Into<ModelId>) -> Result<Model, AirxError> {
+        self.get(model).await
+    }
+
+    /// 统计文本里的 token（`computeTokens`，返回 token ID 与文本）。
+    pub async fn compute_tokens(
+        &self,
+        model: impl Into<ModelId>,
+        request: ComputeTokensRequest,
+    ) -> Result<ComputeTokensResponse, AirxError> {
+        let api = ApiClient::new(
+            ComputeTokensEndpoint::new(self.config.clone(), model.into()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
     /// 自动翻页获取全部模型。
     pub async fn list_all(&self, request: ListModelsRequest) -> Result<Vec<Model>, AirxError> {
         let mut all = Vec::new();
@@ -282,5 +316,104 @@ impl GeminiEmbeddings {
             Arc::clone(&self.executor),
         );
         api.create_with(&request, &self.options).await
+    }
+}
+
+/// Gemini Caches 调用入口（`cachedContents` CRUD）。
+#[derive(Clone)]
+pub struct GeminiCaches {
+    executor: Arc<Executor>,
+    config: GeminiConfig,
+    options: RequestOptions,
+}
+
+impl GeminiCaches {
+    /// 设置本次调用的请求选项。
+    #[must_use]
+    pub fn with_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// 创建缓存。
+    pub async fn create(
+        &self,
+        request: CreateCachedContentRequest,
+    ) -> Result<CachedContent, AirxError> {
+        let api = ApiClient::new(
+            CreateCachedContentEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 读取缓存（名称可带或不带 `cachedContents/` 前缀）。
+    pub async fn get(&self, name: impl Into<String>) -> Result<CachedContent, AirxError> {
+        let api = ApiClient::new(
+            GetCachedContentEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&name.into(), &self.options).await
+    }
+
+    /// 列出一页缓存。
+    pub async fn list(
+        &self,
+        request: ListCachedContentsRequest,
+    ) -> Result<CachedContentList, AirxError> {
+        let api = ApiClient::new(
+            ListCachedContentsEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 续期缓存（只允许更新过期时间）。
+    pub async fn update(
+        &self,
+        name: impl Into<String>,
+        request: UpdateCachedContentRequest,
+    ) -> Result<CachedContent, AirxError> {
+        let api = ApiClient::new(
+            UpdateCachedContentEndpoint::new(self.config.clone(), name),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&request, &self.options).await
+    }
+
+    /// 删除缓存。
+    pub async fn delete(&self, name: impl Into<String>) -> Result<CachedContentDelete, AirxError> {
+        let api = ApiClient::new(
+            DeleteCachedContentEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        api.create_with(&name.into(), &self.options).await
+    }
+
+    /// 自动翻页获取全部缓存。
+    pub async fn list_all(
+        &self,
+        request: ListCachedContentsRequest,
+    ) -> Result<Vec<CachedContent>, AirxError> {
+        let mut all = Vec::new();
+        let mut page_token = request.page_token.clone();
+
+        loop {
+            let page = self
+                .list(ListCachedContentsRequest {
+                    page_size: request.page_size,
+                    page_token: page_token.clone(),
+                })
+                .await?;
+
+            let next = page.next_cursor().map(str::to_owned);
+            all.extend(page.cached_contents);
+            match next {
+                Some(cursor) if Some(&cursor) != page_token.as_ref() => page_token = Some(cursor),
+                _ => break,
+            }
+        }
+
+        Ok(all)
     }
 }

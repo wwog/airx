@@ -25,6 +25,12 @@ pub struct ChatCompletionChunk {
     /// 用量（仅 `include_usage` 时的最后一个 chunk）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// 系统指纹（与完整响应同名字段一致）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
+    /// 实际服务等级。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -66,6 +72,12 @@ pub struct ChunkDelta {
     /// 服务端工具调用记录（DeepSeek 在最终 chunk 一次性返回）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_tool_calls: Option<Vec<Value>>,
+    /// 拒答增量。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+    /// 已弃用的 function_call 增量（官方保留旧字段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function_call: Option<ChunkFunctionCall>,
     /// 工具调用增量。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ChunkToolCall>>,
@@ -88,13 +100,30 @@ pub struct ChunkToolCall {
     /// 函数增量。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub function: Option<ChunkFunctionCall>,
+    /// custom 工具增量（`{name?, input?}`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<ChunkCustomToolCall>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// custom 工具调用增量。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChunkCustomToolCall {
+    /// 工具名（仅首个增量）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// free-form 输入增量。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
 }
 
 /// 函数调用增量。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChunkFunctionCall {
     /// 函数名（仅首个增量）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -161,5 +190,53 @@ mod reasoning_tests {
             chunk.choices[0].delta.reasoning_content.as_deref(),
             Some("用户")
         );
+    }
+}
+
+#[cfg(test)]
+mod typed_stream_fields_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn chunk_system_fingerprint_and_service_tier_are_typed() {
+        let chunk: ChatCompletionChunk = serde_json::from_value(json!({
+            "id": "1",
+            "model": "m",
+            "system_fingerprint": "fp_1",
+            "service_tier": "default",
+            "choices": []
+        }))
+        .expect("chunk");
+        assert_eq!(chunk.system_fingerprint.as_deref(), Some("fp_1"));
+        assert_eq!(chunk.service_tier.as_deref(), Some("default"));
+        assert!(!chunk.extensions.contains_key("system_fingerprint"));
+        assert!(!chunk.extensions.contains_key("service_tier"));
+    }
+
+    #[test]
+    fn delta_refusal_and_function_call_are_typed() {
+        let chunk: ChatCompletionChunk = serde_json::from_value(json!({
+            "id": "1",
+            "model": "m",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "refusal": "cannot",
+                    "function_call": {"name": "lookup", "arguments": "{}"}
+                }
+            }]
+        }))
+        .expect("chunk");
+        let delta = &chunk.choices[0].delta;
+        assert_eq!(delta.refusal.as_deref(), Some("cannot"));
+        assert_eq!(
+            delta
+                .function_call
+                .as_ref()
+                .and_then(|call| call.name.as_deref()),
+            Some("lookup")
+        );
+        assert!(delta.extensions.is_empty());
     }
 }

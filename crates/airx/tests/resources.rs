@@ -337,7 +337,8 @@ async fn anthropic_files_and_batches() {
         200,
         json!({"id":"file_1","type":"file","filename":"a.pdf"}).to_string(),
     );
-    mock.push_json(200, json!({"data":[],"has_more":false}).to_string());
+    // 官方 List Files 形状是 {data, next_page}。
+    mock.push_json(200, json!({"data":[],"next_page":"page_2"}).to_string());
     mock.push_json(
         200,
         json!({"id":"msgbatch_1","type":"message_batch","processing_status":"in_progress"})
@@ -352,6 +353,17 @@ async fn anthropic_files_and_batches() {
         HeaderMap::new(),
         Bytes::from_static(b"{\"custom_id\":\"1\"}\n"),
     );
+    mock.push_json(
+        200,
+        json!({"id":"msgbatch_1","type":"message_batch_deleted"}).to_string(),
+    );
+    mock.push_response(
+        200,
+        HeaderMap::new(),
+        Bytes::from_static(
+            b"{\"custom_id\":\"1\",\"result\":{\"type\":\"succeeded\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude\",\"content\":[]}}}\n",
+        ),
+    );
 
     let client = anthropic(&mock);
     let file = client
@@ -361,11 +373,12 @@ async fn anthropic_files_and_batches() {
         .expect("upload");
     assert_eq!(file.id, "file_1");
 
-    let _ = client
+    let page = client
         .files()
         .list(AnthropicListFilesRequest::builder().limit(10).build())
         .await
         .expect("list");
+    assert_eq!(page.next_page(), Some("page_2"));
 
     let request = MessagesRequest::builder()
         .model("claude-sonnet-4-5")
@@ -390,6 +403,21 @@ async fn anthropic_files_and_batches() {
         .expect("results");
     assert!(!results.is_empty());
 
+    let deleted = client
+        .batches()
+        .delete("msgbatch_1")
+        .await
+        .expect("delete batch");
+    assert_eq!(deleted.id, "msgbatch_1");
+    assert_eq!(deleted.kind.as_deref(), Some("message_batch_deleted"));
+
+    let lines = client
+        .batches()
+        .results_typed("msgbatch_1")
+        .await
+        .expect("typed results");
+    assert_eq!(lines.len(), 1);
+
     let requests = mock.requests();
     assert_eq!(requests[0].uri.path(), "/v1/files");
     assert!(
@@ -398,6 +426,7 @@ async fn anthropic_files_and_batches() {
             .expect("content-type")
             .starts_with("multipart/form-data")
     );
+    assert_eq!(requests[1].uri.query(), Some("limit=10"));
     assert_eq!(requests[2].uri.path(), "/v1/messages/batches");
     assert_eq!(
         requests[3].uri.path(),
@@ -405,6 +434,12 @@ async fn anthropic_files_and_batches() {
     );
     assert_eq!(
         requests[4].uri.path(),
+        "/v1/messages/batches/msgbatch_1/results"
+    );
+    assert_eq!(requests[5].method, Method::DELETE);
+    assert_eq!(requests[5].uri.path(), "/v1/messages/batches/msgbatch_1");
+    assert_eq!(
+        requests[6].uri.path(),
         "/v1/messages/batches/msgbatch_1/results"
     );
 }

@@ -8,8 +8,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use super::common::ReasoningSummary;
-use super::tool::ResponsesTool;
-use crate::openai::chat::ToolChoice;
+use super::response::{OutputContent, OutputItem, ResponsesResponse};
+use super::tool::{ResponsesTool, ResponsesToolChoice};
 use crate::openai::common::reasoning::ReasoningEffort;
 
 /// Responses 输入：纯文本或 item 列表。
@@ -41,6 +41,16 @@ impl From<&str> for InputMessageContent {
 impl From<String> for InputMessageContent {
     fn from(value: String) -> Self {
         Self::Text(value)
+    }
+}
+
+impl InputMessageContent {
+    /// 纯文本内容（多模态时返回 None）。
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::Parts(_) => None,
+        }
     }
 }
 
@@ -236,6 +246,121 @@ pub enum InputItem {
     },
     /// 未识别 item（原样保留）。
     Other(Value),
+}
+
+impl InputItem {
+    /// 构造 user 文本消息。
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::Message {
+            role: "user".to_owned(),
+            content: InputMessageContent::Text(content.into()),
+        }
+    }
+
+    /// 构造 system / developer 文本消息。
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::Message {
+            role: "system".to_owned(),
+            content: InputMessageContent::Text(content.into()),
+        }
+    }
+
+    /// 构造 assistant 文本消息（回传历史时使用）。
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self::Message {
+            role: "assistant".to_owned(),
+            content: InputMessageContent::Text(content.into()),
+        }
+    }
+
+    /// 构造函数调用 item（回传历史时使用）。
+    pub fn function_call(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        Self::FunctionCall {
+            call_id: call_id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+        }
+    }
+
+    /// 构造函数调用结果。
+    pub fn function_call_output(call_id: impl Into<String>, output: impl Into<String>) -> Self {
+        Self::FunctionCallOutput {
+            call_id: call_id.into(),
+            output: output.into(),
+        }
+    }
+}
+
+/// `OutputItem` → `InputItem`：直接复用上一次响应作为下一轮输入。
+///
+/// 映射规则：
+/// - `message`：拼接全部 `output_text`（无文本时回退到拒答文本）；
+/// - `function_call`：`call_id` / `name` / `arguments` 原样保留；
+/// - `reasoning`：`id` / `summary` / `encrypted_content` 原样保留；
+/// - 其他 item（服务端工具调用、custom tool call、compaction 等）：
+///   保留完整 JSON，避免丢字段。
+///
+/// 注意：官方 item 的 `id` / `status` 不是输入必需字段；`message` 转换时
+/// 会丢弃 `id` / `status`（官方也不要求回传），`reasoning` 则保留 `id`。
+impl From<OutputItem> for InputItem {
+    fn from(item: OutputItem) -> Self {
+        match item {
+            OutputItem::Message(message) => {
+                // 只有「纯 output_text 且无标注」的消息才能无损压成字符串输入；
+                // `input_text`（compact 结果）、refusal、标注等必须原样回传整个
+                // message item，否则会丢内容。
+                let plain = !message.content.is_empty()
+                    && message.content.iter().all(|content| {
+                        matches!(
+                            content,
+                            OutputContent::OutputText(output)
+                                if output.annotations.is_empty() && output.extensions.is_empty()
+                        )
+                    });
+                if plain {
+                    let mut text = String::new();
+                    for content in &message.content {
+                        if let OutputContent::OutputText(output) = content {
+                            text.push_str(&output.text);
+                        }
+                    }
+                    Self::Message {
+                        role: message.role,
+                        content: InputMessageContent::Text(text),
+                    }
+                } else {
+                    Self::Other(
+                        serde_json::to_value(OutputItem::Message(message)).unwrap_or(Value::Null),
+                    )
+                }
+            }
+            OutputItem::FunctionCall(call) => Self::FunctionCall {
+                call_id: call.call_id,
+                name: call.name,
+                arguments: call.arguments,
+            },
+            OutputItem::Reasoning(item) => Self::Reasoning {
+                id: item.id,
+                summary: Some(item.summary),
+                encrypted_content: item.encrypted_content,
+                extensions: item.extensions,
+            },
+            other => Self::Other(serde_json::to_value(other).unwrap_or(Value::Null)),
+        }
+    }
+}
+
+impl ResponsesResponse {
+    /// 把本次响应转换为下一轮输入 item 列表。
+    ///
+    /// 适用于 `store: false` / ZDR 场景：官方不保存响应，多轮必须自行回传。
+    pub fn into_input(self) -> Vec<InputItem> {
+        self.output.into_iter().map(InputItem::from).collect()
+    }
 }
 
 impl Serialize for InputItem {
@@ -478,6 +603,81 @@ pub enum TextFormat {
     },
 }
 
+/// 上下文管理项（当前只有 `compaction`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextManagement {
+    /// 类型（官方目前只有 `compaction`）。
+    #[serde(rename = "type", default = "compaction_kind")]
+    pub kind: String,
+    /// 触发压缩的 token 阈值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_threshold: Option<u32>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+impl ContextManagement {
+    /// 构造 compaction 项。
+    pub fn compaction(compact_threshold: Option<u32>) -> Self {
+        Self {
+            kind: compaction_kind(),
+            compact_threshold,
+            extensions: Extensions::new(),
+        }
+    }
+}
+
+fn compaction_kind() -> String {
+    "compaction".to_owned()
+}
+
+/// 可复用提示词模板。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Prompt {
+    /// 模板 ID。
+    pub id: String,
+    /// 模板版本。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// 模板变量（字符串或 input 片段，原样保留）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables: Option<Value>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// Responses 提示词缓存选项。
+///
+/// 官方仅 `gpt-5.6+` 支持；airx 不做模型能力校验。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PromptCacheOptions {
+    /// `implicit`（默认）或 `explicit`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// 每个缓存断点的最短生命周期（`30m` / `12h`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+    /// 仅预热缓存，不生成输出。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prewarm: Option<bool>,
+    /// 用于诊断缓存的对比响应 ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison_response_id: Option<String>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+/// Responses 流式选项。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponsesStreamOptions {
+    /// 是否启用流式混淆（默认由服务端决定）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_obfuscation: Option<bool>,
+}
+
 /// Responses 请求。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResponsesRequest {
@@ -501,12 +701,15 @@ pub struct ResponsesRequest {
     /// 核采样。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
+    /// 每个 token 位置返回的候选数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_logprobs: Option<u32>,
     /// 工具。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ResponsesTool>>,
-    /// 工具选择。
+    /// 工具选择（Responses 扁平形状）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<ToolChoice>,
+    pub tool_choice: Option<ResponsesToolChoice>,
     /// 是否允许并行工具调用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
@@ -516,6 +719,15 @@ pub struct ResponsesRequest {
     /// 文本输出配置。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<TextConfig>,
+    /// 上下文管理（服务端压缩长对话）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_management: Option<Vec<ContextManagement>>,
+    /// 可复用提示词模板。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<Prompt>,
+    /// 终端用户标识（官方已标记为被 `safety_identifier` / `prompt_cache_key` 取代）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
     /// 是否存储响应。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<bool>,
@@ -540,6 +752,12 @@ pub struct ResponsesRequest {
     /// Prompt 缓存键。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
+    /// Prompt 缓存选项（gpt-5.6+）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_options: Option<PromptCacheOptions>,
+    /// Prompt 缓存保留策略（已弃用；推荐 `prompt_cache_options.ttl`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention: Option<String>,
     /// 安全标识。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safety_identifier: Option<String>,
@@ -549,6 +767,9 @@ pub struct ResponsesRequest {
     /// 是否流式。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// 流式选项。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<ResponsesStreamOptions>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -571,11 +792,15 @@ pub struct ResponsesRequestBuilder {
     max_output_tokens: Option<u32>,
     temperature: Option<f32>,
     top_p: Option<f32>,
+    top_logprobs: Option<u32>,
     tools: Option<Vec<ResponsesTool>>,
-    tool_choice: Option<ToolChoice>,
+    tool_choice: Option<ResponsesToolChoice>,
     parallel_tool_calls: Option<bool>,
     reasoning: Option<Reasoning>,
     text: Option<TextConfig>,
+    context_management: Option<Vec<ContextManagement>>,
+    prompt: Option<Prompt>,
+    user: Option<String>,
     store: Option<bool>,
     background: Option<bool>,
     include: Option<Vec<String>>,
@@ -584,9 +809,12 @@ pub struct ResponsesRequestBuilder {
     metadata: Option<Value>,
     service_tier: Option<String>,
     prompt_cache_key: Option<String>,
+    prompt_cache_options: Option<PromptCacheOptions>,
+    prompt_cache_retention: Option<String>,
     safety_identifier: Option<String>,
     max_tool_calls: Option<u32>,
     stream: Option<bool>,
+    stream_options: Option<ResponsesStreamOptions>,
     extensions: Extensions,
 }
 
@@ -647,6 +875,13 @@ impl ResponsesRequestBuilder {
         self
     }
 
+    /// 设置每个 token 位置返回的候选数。
+    #[must_use]
+    pub fn top_logprobs(mut self, top_logprobs: u32) -> Self {
+        self.top_logprobs = Some(top_logprobs);
+        self
+    }
+
     /// 设置工具（函数工具或服务端工具）。
     #[must_use]
     pub fn tools(mut self, tools: impl IntoIterator<Item = ResponsesTool>) -> Self {
@@ -654,10 +889,11 @@ impl ResponsesRequestBuilder {
         self
     }
 
-    /// 设置工具选择。
+    /// 设置工具选择（也可传 Chat 的 [`crate::openai::chat::ToolChoice`]：
+    /// 实现了 `Into<ResponsesToolChoice>`）。
     #[must_use]
-    pub fn tool_choice(mut self, tool_choice: ToolChoice) -> Self {
-        self.tool_choice = Some(tool_choice);
+    pub fn tool_choice(mut self, tool_choice: impl Into<ResponsesToolChoice>) -> Self {
+        self.tool_choice = Some(tool_choice.into());
         self
     }
 
@@ -695,6 +931,30 @@ impl ResponsesRequestBuilder {
     #[must_use]
     pub fn text_verbosity(mut self, verbosity: impl Into<String>) -> Self {
         self.text.get_or_insert_with(TextConfig::default).verbosity = Some(verbosity.into());
+        self
+    }
+
+    /// 设置上下文管理（服务端压缩）。
+    #[must_use]
+    pub fn context_management(
+        mut self,
+        entries: impl IntoIterator<Item = ContextManagement>,
+    ) -> Self {
+        self.context_management = Some(entries.into_iter().collect());
+        self
+    }
+
+    /// 设置可复用提示词模板。
+    #[must_use]
+    pub fn prompt(mut self, prompt: Prompt) -> Self {
+        self.prompt = Some(prompt);
+        self
+    }
+
+    /// 设置终端用户标识。
+    #[must_use]
+    pub fn user(mut self, user: impl Into<String>) -> Self {
+        self.user = Some(user.into());
         self
     }
 
@@ -754,6 +1014,20 @@ impl ResponsesRequestBuilder {
         self
     }
 
+    /// 设置 Prompt 缓存选项（gpt-5.6+）。
+    #[must_use]
+    pub fn prompt_cache_options(mut self, options: PromptCacheOptions) -> Self {
+        self.prompt_cache_options = Some(options);
+        self
+    }
+
+    /// 设置 Prompt 缓存保留策略（已弃用）。
+    #[must_use]
+    pub fn prompt_cache_retention(mut self, retention: impl Into<String>) -> Self {
+        self.prompt_cache_retention = Some(retention.into());
+        self
+    }
+
     /// 设置安全标识。
     #[must_use]
     pub fn safety_identifier(mut self, identifier: impl Into<String>) -> Self {
@@ -772,6 +1046,13 @@ impl ResponsesRequestBuilder {
     #[must_use]
     pub fn stream(mut self, stream: bool) -> Self {
         self.stream = Some(stream);
+        self
+    }
+
+    /// 设置流式选项。
+    #[must_use]
+    pub fn stream_options(mut self, options: ResponsesStreamOptions) -> Self {
+        self.stream_options = Some(options);
         self
     }
 
@@ -796,11 +1077,15 @@ impl ResponsesRequestBuilder {
             max_output_tokens: self.max_output_tokens,
             temperature: self.temperature,
             top_p: self.top_p,
+            top_logprobs: self.top_logprobs,
             tools: self.tools,
             tool_choice: self.tool_choice,
             parallel_tool_calls: self.parallel_tool_calls,
             reasoning: self.reasoning,
             text: self.text,
+            context_management: self.context_management,
+            prompt: self.prompt,
+            user: self.user,
             store: self.store,
             background: self.background,
             include: self.include,
@@ -809,9 +1094,12 @@ impl ResponsesRequestBuilder {
             metadata: self.metadata,
             service_tier: self.service_tier,
             prompt_cache_key: self.prompt_cache_key,
+            prompt_cache_options: self.prompt_cache_options,
+            prompt_cache_retention: self.prompt_cache_retention,
             safety_identifier: self.safety_identifier,
             max_tool_calls: self.max_tool_calls,
             stream: self.stream,
+            stream_options: self.stream_options,
             extensions: self.extensions,
         })
     }
@@ -904,5 +1192,157 @@ mod alignment_tests {
         assert_eq!(value["include"][0], "reasoning.encrypted_content");
         assert_eq!(value["reasoning"]["summary"], "detailed");
         assert_eq!(value["text"]["verbosity"], "low");
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn response() -> ResponsesResponse {
+        serde_json::from_value(json!({
+            "id": "resp_1",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "你好", "annotations": []}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "{\"q\":1}"
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [],
+                    "encrypted_content": "cipher"
+                },
+                {"type": "web_search_call", "id": "ws_1", "status": "completed"}
+            ]
+        }))
+        .expect("response")
+    }
+
+    #[test]
+    fn output_items_convert_to_input_items() {
+        let items = response().into_input();
+        assert_eq!(items.len(), 4);
+        match &items[0] {
+            InputItem::Message { role, content } => {
+                assert_eq!(role, "assistant");
+                assert_eq!(content.as_text(), Some("你好"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert_eq!(
+            items[1],
+            InputItem::function_call("call_1", "lookup", "{\"q\":1}")
+        );
+        match &items[2] {
+            InputItem::Reasoning {
+                id,
+                encrypted_content,
+                ..
+            } => {
+                assert_eq!(id.as_deref(), Some("rs_1"));
+                assert_eq!(encrypted_content.as_deref(), Some("cipher"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(matches!(items[3], InputItem::Other(_)));
+    }
+
+    #[test]
+    fn replayed_items_keep_wire_shape() {
+        let value = serde_json::to_value(response().into_input()).expect("serialize");
+        assert_eq!(value[0]["type"], "message");
+        assert_eq!(value[0]["role"], "assistant");
+        assert_eq!(value[0]["content"], "你好");
+        assert_eq!(value[1]["type"], "function_call");
+        assert_eq!(value[1]["call_id"], "call_1");
+        assert_eq!(value[2]["type"], "reasoning");
+        assert_eq!(value[2]["encrypted_content"], "cipher");
+        assert_eq!(value[3]["type"], "web_search_call");
+    }
+
+    #[test]
+    fn input_item_constructors_serialize() {
+        assert_eq!(
+            serde_json::to_value(InputItem::user("hi")).expect("serialize"),
+            json!({"type": "message", "role": "user", "content": "hi"})
+        );
+        assert_eq!(
+            serde_json::to_value(InputItem::function_call_output("call_1", "42"))
+                .expect("serialize"),
+            json!({"type": "function_call_output", "call_id": "call_1", "output": "42"})
+        );
+    }
+
+    #[test]
+    fn new_p2_request_fields_serialize() {
+        let request = ResponsesRequest::builder()
+            .model("gpt-5.6")
+            .context_management([ContextManagement::compaction(Some(120_000))])
+            .top_logprobs(3)
+            .user("user-1")
+            .prompt(Prompt {
+                id: "pmpt_1".to_owned(),
+                version: Some("2".to_owned()),
+                variables: Some(json!({"name": "Ada"})),
+                extensions: Extensions::new(),
+            })
+            .prompt_cache_options(PromptCacheOptions {
+                mode: Some("explicit".to_owned()),
+                ttl: Some("12h".to_owned()),
+                prewarm: None,
+                comparison_response_id: None,
+                extensions: Extensions::new(),
+            })
+            .prompt_cache_retention("24h")
+            .stream_options(ResponsesStreamOptions {
+                include_obfuscation: Some(false),
+            })
+            .build()
+            .expect("request");
+
+        let value = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(value["context_management"][0]["type"], "compaction");
+        assert_eq!(value["context_management"][0]["compact_threshold"], 120_000);
+        assert_eq!(value["top_logprobs"], 3);
+        assert_eq!(value["user"], "user-1");
+        assert_eq!(value["prompt"]["id"], "pmpt_1");
+        assert_eq!(value["prompt"]["version"], "2");
+        assert_eq!(value["prompt"]["variables"]["name"], "Ada");
+        assert_eq!(value["prompt_cache_options"]["mode"], "explicit");
+        assert_eq!(value["prompt_cache_options"]["ttl"], "12h");
+        assert_eq!(value["prompt_cache_retention"], "24h");
+        assert_eq!(value["stream_options"]["include_obfuscation"], false);
+    }
+
+    #[test]
+    fn responses_tool_choice_uses_flat_shape() {
+        let request = ResponsesRequest::builder()
+            .model("gpt-5")
+            .tools([ResponsesTool::function(
+                "lookup",
+                json!({"type": "object"}),
+                None,
+            )])
+            .tool_choice(ResponsesToolChoice::function("lookup"))
+            .build()
+            .expect("request");
+
+        let value = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(value["tools"][0]["type"], "function");
+        assert_eq!(value["tools"][0]["name"], "lookup");
+        assert!(value["tools"][0].get("function").is_none());
+        assert_eq!(
+            value["tool_choice"],
+            json!({"type": "function", "name": "lookup"})
+        );
     }
 }

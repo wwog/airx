@@ -73,7 +73,9 @@ impl ItemState {
             | OutputItem::FileSearchCall(_)
             | OutputItem::CodeInterpreterCall(_)
             | OutputItem::ImageGenerationCall(_)
-            | OutputItem::McpCall(_)) => {
+            | OutputItem::McpCall(_)
+            | OutputItem::CustomToolCall(_)
+            | OutputItem::Compaction(_)) => {
                 Self::Other(serde_json::to_value(item).unwrap_or(Value::Null))
             }
             OutputItem::Other(value) => Self::Other(value),
@@ -339,15 +341,28 @@ impl ResponsesStreamAccumulator {
         }
     }
 
+    /// 结束并返回当前累积结果，不判断完成状态。
+    ///
+    /// 与 [`ResponsesStreamAccumulator::finish`] 的严格语义不同：即使流被截断
+    /// 或失败，也把已累积的内容返回给调用方（用于“截断也要展示”的场景）。
+    pub fn finish_partial(self) -> (ResponsesResponse, StreamStatus) {
+        let status = self.status;
+        let response = self.build(None);
+        (response, status)
+    }
+
     fn build(&self, status: Option<&str>) -> ResponsesResponse {
         let mut response = self.response.clone().unwrap_or_else(|| ResponsesResponse {
             id: String::new(),
             object: None,
             created_at: None,
+            completed_at: None,
             status: None,
             model: None,
             output: Vec::new(),
             usage: None,
+            prompt_cache_diagnostics: None,
+            tool_usage: None,
             incomplete_details: None,
             error: None,
             extensions: Extensions::new(),
@@ -493,5 +508,29 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn finish_partial_keeps_partial_text_after_incomplete() {
+        let mut acc = ResponsesStreamAccumulator::new();
+        acc.apply(event(json!({
+            "type": "response.created",
+            "response": {"id": "resp_1", "status": "in_progress", "output": []}
+        })))
+        .expect("created");
+        acc.apply(event(json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1", "output_index": 0, "delta": "半截"
+        })))
+        .expect("delta");
+        acc.apply(event(json!({
+            "type": "response.incomplete",
+            "response": {"id": "resp_1", "status": "incomplete", "output": []}
+        })))
+        .expect("incomplete");
+
+        let (response, status) = acc.finish_partial();
+        assert_eq!(status, StreamStatus::Incomplete);
+        assert_eq!(response.output_text(), "半截");
     }
 }

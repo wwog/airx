@@ -12,7 +12,8 @@ mod tool;
 pub use accumulator::GenerateContentStreamAccumulator;
 pub use content::{
     CodeExecutionResultPart, Content, ExecutableCodePart, FileDataPart, FunctionCallPart,
-    FunctionResponsePart, InlineDataPart, Part, Role, TextPart,
+    FunctionResponseBlob, FunctionResponseFileData, FunctionResponseMedia, FunctionResponsePart,
+    InlineDataPart, Part, Role, TextPart, VideoMetadata,
 };
 pub use count_tokens::{
     CountTokensEndpoint, CountTokensRequest, CountTokensRequestBuilder, CountTokensResponse,
@@ -22,7 +23,10 @@ pub use endpoint::{
     GENERATE_CONTENT_SUFFIX, GenerateContentEndpoint, GenerateContentMode,
     STREAM_GENERATE_CONTENT_SUFFIX,
 };
-pub use generation::{GenerationConfig, SafetySetting, ThinkingConfig};
+pub use generation::{
+    AudioTranscriptionConfig, GenerationConfig, ImageConfig, PrebuiltVoiceConfig, SafetySetting,
+    ServiceTier, SpeechConfig, ThinkingConfig, TranslationConfig, VoiceConfig,
+};
 pub use request::{GenerateContentRequest, GenerateContentRequestBuilder};
-pub use response::{Candidate, GenerateContentResponse, PromptFeedback};
+pub use response::{Candidate, FinishReason, GenerateContentResponse, PromptFeedback};
 pub use tool::{FunctionCallingConfig, FunctionCallingMode, FunctionDeclaration, Tool, ToolConfig};

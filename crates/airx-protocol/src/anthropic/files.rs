@@ -39,26 +39,26 @@ pub struct FileMetadata {
     /// 是否可下载。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downloadable: Option<bool>,
+    /// 过期时间（RFC 3339；不随 `expires_in_seconds` 上传时为 `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
 }
 
 /// 文件列表。
+///
+/// 官方形状是 `{data, next_page}`：把 `next_page` 原样回填到
+/// [`ListFilesRequest::page`] 即可取下一页。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileList {
     /// 文件数组。
     #[serde(default)]
     pub data: Vec<FileMetadata>,
-    /// 是否还有下一页。
+    /// 下一页游标（`null` 表示没有更多）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub has_more: Option<bool>,
-    /// 当前页第一个 ID。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub first_id: Option<String>,
-    /// 当前页最后一个 ID。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_id: Option<String>,
+    pub next_page: Option<String>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -66,30 +66,35 @@ pub struct FileList {
 
 impl FileList {
     /// 下一页游标。
+    pub fn next_page(&self) -> Option<&str> {
+        self.next_page.as_deref()
+    }
+
+    /// 下一页游标（旧名，等价于 [`FileList::next_page`]）。
+    #[deprecated(note = "官方 Files 分页字段是 next_page，请改用 next_page()")]
     pub fn next_cursor(&self) -> Option<&str> {
-        if self.has_more == Some(true) {
-            self.last_id.as_deref()
-        } else {
-            None
-        }
+        self.next_page()
     }
 }
 
 /// 删除结果。
+///
+/// 官方 `DeletedFile` 只有 `{id, type}`；airx 早期自造的 `deleted: bool` 从未被
+/// 官方返回，已移除。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileDeleteResponse {
     /// 文件 ID。
     pub id: String,
-    /// 对象类型。
+    /// 对象类型（`file_deleted`）。
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// 是否删除。
-    #[serde(default)]
-    pub deleted: bool,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
 }
+
+/// 官方命名（与 [`FileDeleteResponse`] 相同）。
+pub type DeletedFile = FileDeleteResponse;
 
 /// 上传请求。
 #[derive(Debug, Clone, PartialEq)]
@@ -102,6 +107,8 @@ pub struct UploadFileRequest {
     pub data: Bytes,
     /// multipart boundary。
     pub boundary: String,
+    /// 上传后多少秒过期（3600–7776000），`None` 表示不过期。
+    pub expires_in_seconds: Option<u32>,
 }
 
 impl UploadFileRequest {
@@ -117,22 +124,33 @@ impl UploadFileRequest {
             mime_type: mime_type.into(),
             data: data.into(),
             boundary: boundary.into(),
+            expires_in_seconds: None,
         }
+    }
+
+    /// 设置 `expires_in_seconds`（官方区间 3600–7776000 秒）。
+    #[must_use]
+    pub fn with_expires_in_seconds(mut self, seconds: u32) -> Self {
+        self.expires_in_seconds = Some(seconds);
+        self
     }
 }
 
 /// 列表参数。
+///
+/// 官方 `FileListParams`：`limit` / `page` / `ids`（`ids` 与 `page` / `limit`
+/// 互斥）。旧的 `after_id` / `before_id` 在官方 Files 列表上已返回 400。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListFilesRequest {
-    /// 每页数量。
+    /// 每页数量（1–1000，默认 20）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
-    /// 从该 ID 之后开始。
+    /// 上一页响应里的 `next_page` 游标。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after_id: Option<String>,
-    /// 从该 ID 之前开始。
+    pub page: Option<String>,
+    /// 只查询这些文件 ID（最多 100 个；与 `page` / `limit` 互斥）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub before_id: Option<String>,
+    pub ids: Option<Vec<String>>,
 }
 
 impl ListFilesRequest {
@@ -140,14 +158,23 @@ impl ListFilesRequest {
     pub fn builder() -> ListFilesRequestBuilder {
         ListFilesRequestBuilder::default()
     }
+
+    /// 按 ID 集合查询。
+    pub fn by_ids(ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            limit: None,
+            page: None,
+            ids: Some(ids.into_iter().map(Into::into).collect()),
+        }
+    }
 }
 
 /// [`ListFilesRequest`] 构建器。
 #[derive(Debug, Default, Clone)]
 pub struct ListFilesRequestBuilder {
     limit: Option<u32>,
-    after_id: Option<String>,
-    before_id: Option<String>,
+    page: Option<String>,
+    ids: Option<Vec<String>>,
 }
 
 impl ListFilesRequestBuilder {
@@ -158,17 +185,17 @@ impl ListFilesRequestBuilder {
         self
     }
 
-    /// 从该 ID 之后开始。
+    /// 下一页游标（来自上一页的 `next_page`）。
     #[must_use]
-    pub fn after_id(mut self, after_id: impl Into<String>) -> Self {
-        self.after_id = Some(after_id.into());
+    pub fn page(mut self, page: impl Into<String>) -> Self {
+        self.page = Some(page.into());
         self
     }
 
-    /// 从该 ID 之前开始。
+    /// 只查询这些文件 ID。
     #[must_use]
-    pub fn before_id(mut self, before_id: impl Into<String>) -> Self {
-        self.before_id = Some(before_id.into());
+    pub fn ids(mut self, ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.ids = Some(ids.into_iter().map(Into::into).collect());
         self
     }
 
@@ -176,8 +203,8 @@ impl ListFilesRequestBuilder {
     pub fn build(self) -> ListFilesRequest {
         ListFilesRequest {
             limit: self.limit,
-            after_id: self.after_id,
-            before_id: self.before_id,
+            page: self.page,
+            ids: self.ids,
         }
     }
 }
@@ -204,7 +231,11 @@ impl Endpoint for UploadFileEndpoint {
     type Response = FileMetadata;
 
     fn encode(&self, request: &Self::Request) -> Result<HttpRequest, AirxError> {
-        let form = MultipartForm::new(request.boundary.clone())?.file(
+        let mut form = MultipartForm::new(request.boundary.clone())?;
+        if let Some(seconds) = request.expires_in_seconds {
+            form = form.text("expires_in_seconds", seconds.to_string());
+        }
+        let form = form.file(
             "file",
             request.filename.clone(),
             request.mime_type.clone(),
@@ -246,11 +277,13 @@ impl ListFilesEndpoint {
         if let Some(limit) = request.limit {
             query.push(format!("limit={limit}"));
         }
-        if let Some(after_id) = &request.after_id {
-            query.push(format!("after_id={}", query_value(after_id)?));
+        if let Some(page) = &request.page {
+            query.push(format!("page={}", query_value(page, "page")?));
         }
-        if let Some(before_id) = &request.before_id {
-            query.push(format!("before_id={}", query_value(before_id)?));
+        if let Some(ids) = &request.ids {
+            for id in ids {
+                query.push(format!("ids[]={}", query_value(id, "ids")?));
+            }
         }
         let path = if query.is_empty() {
             FILES_PATH.to_owned()
@@ -410,15 +443,15 @@ fn file_id(id: &str) -> Result<String, AirxError> {
     Ok(text.to_owned())
 }
 
-fn query_value(value: &str) -> Result<String, AirxError> {
+fn query_value(value: &str, field: &str) -> Result<String, AirxError> {
     if value.is_empty()
         || !value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
     {
-        return Err(AirxError::Configuration(ConfigurationError::new(
-            "Anthropic files 游标含非法字符",
-        )));
+        return Err(AirxError::Configuration(ConfigurationError::new(format!(
+            "Anthropic files {field} 含非法字符"
+        ))));
     }
     Ok(value.to_owned())
 }
@@ -428,16 +461,83 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn endpoint() -> ListFilesEndpoint {
+        ListFilesEndpoint::new(AnthropicConfig::new("sk-ant-test"))
+    }
+
     #[test]
     fn file_metadata_decodes() {
         let file: FileMetadata = serde_json::from_value(json!({
             "id": "file_1",
             "type": "file",
             "filename": "a.pdf",
-            "mime_type": "application/pdf"
+            "mime_type": "application/pdf",
+            "expires_at": "2026-12-01T00:00:00Z"
         }))
         .expect("file");
         assert_eq!(file.id, "file_1");
         assert_eq!(file.mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(file.expires_at.as_deref(), Some("2026-12-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn list_uses_page_cursor_and_ids() {
+        let http = endpoint()
+            .encode(&ListFilesRequest::builder().limit(10).page("page_1").build())
+            .expect("encode");
+        assert_eq!(http.uri.path(), "/v1/files");
+        assert_eq!(http.uri.query(), Some("limit=10&page=page_1"));
+
+        let http = endpoint()
+            .encode(&ListFilesRequest::by_ids(["file_1", "file_2"]))
+            .expect("encode");
+        assert_eq!(http.uri.query(), Some("ids[]=file_1&ids[]=file_2"));
+    }
+
+    #[test]
+    fn file_list_reads_next_page() {
+        let list: FileList = serde_json::from_value(json!({
+            "data": [{"id": "file_1"}],
+            "next_page": "page_2"
+        }))
+        .expect("list");
+        assert_eq!(list.next_page(), Some("page_2"));
+        assert_eq!(list.data[0].id, "file_1");
+
+        let list: FileList =
+            serde_json::from_value(json!({"data": [], "next_page": null})).expect("list");
+        assert_eq!(list.next_page(), None);
+    }
+
+    #[test]
+    fn delete_response_has_no_deleted_flag() {
+        let response: FileDeleteResponse =
+            serde_json::from_value(json!({"id": "file_1", "type": "file_deleted"}))
+                .expect("delete");
+        assert_eq!(response.id, "file_1");
+        assert_eq!(response.kind.as_deref(), Some("file_deleted"));
+
+        let value = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(value, json!({"id": "file_1", "type": "file_deleted"}));
+        assert!(value.get("deleted").is_none());
+
+        let _ = DeletedFile {
+            id: "file_1".to_owned(),
+            kind: Some("file_deleted".to_owned()),
+            extensions: Extensions::new(),
+        };
+    }
+
+    #[test]
+    fn upload_carries_expires_in_seconds() {
+        let request = UploadFileRequest::new("a.pdf", "application/pdf", vec![1u8], "bnd")
+            .with_expires_in_seconds(3600);
+        let http = UploadFileEndpoint::new(AnthropicConfig::new("sk-ant-test"))
+            .encode(&request)
+            .expect("encode");
+        let body = String::from_utf8_lossy(&http.body);
+        assert!(body.contains("name=\"expires_in_seconds\""));
+        assert!(body.contains("3600"));
+        assert!(body.contains("filename=\"a.pdf\""));
     }
 }

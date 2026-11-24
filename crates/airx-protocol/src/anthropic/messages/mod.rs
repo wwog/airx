@@ -14,16 +14,18 @@ pub use count_tokens::{
 };
 pub use endpoint::{MESSAGES_PATH, MessagesEndpoint};
 pub use event::{
-    ContentBlockDelta, ContentBlockStart, ContentBlockStop, Delta, ErrorBody, ErrorEvent,
-    InputJsonDelta, MessageDelta, MessageDeltaEvent, MessageStart, MessageStop, MessagesEvent,
-    Ping, SignatureDelta, TextDelta, ThinkingDelta,
+    CitationsDelta, ContentBlockDelta, ContentBlockStart, ContentBlockStop, Delta, ErrorBody,
+    ErrorEvent, InputJsonDelta, MessageDelta, MessageDeltaEvent, MessageStart, MessageStop,
+    MessagesEvent, Ping, SignatureDelta, TextDelta, ThinkingDelta,
 };
 pub use message::{
-    ContentBlock, ImageBlock, MessageContent, RedactedThinkingBlock, Role, ServerToolUseBlock,
+    CacheControl, CacheKind, CacheTtl, CitationsConfig, ContentBlock, DocumentBlock,
+    DocumentSource, ImageBlock, MessageContent, RedactedThinkingBlock, Role, ServerToolUseBlock,
     TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock, WebSearchToolResultBlock,
 };
 pub use request::{
-    ClientTool, JsonOutputFormat, Message, MessagesRequest, MessagesRequestBuilder, OutputConfig,
-    OutputEffort, ThinkingConfig, ThinkingDisplay, Tool, ToolChoice, WebSearchKind, WebSearchTool,
+    ClientTool, ContainerParam, ContainerRef, DiagnosticsParam, JsonOutputFormat, Message,
+    MessagesRequest, MessagesRequestBuilder, Metadata, OutputConfig, OutputEffort, SystemPrompt,
+    ThinkingConfig, ThinkingDisplay, Tool, ToolChoice, WebSearchKind, WebSearchTool,
 };
-pub use response::MessagesResponse;
+pub use response::{Container, Diagnostics, MessagesResponse, RefusalStopDetails, StopReason};

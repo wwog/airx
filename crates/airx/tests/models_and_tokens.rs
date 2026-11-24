@@ -3,6 +3,7 @@
 #![cfg(all(feature = "openai", feature = "anthropic", feature = "gemini"))]
 
 use airx::prelude::*;
+use airx_protocol::anthropic::models::ModelLifecycle;
 use airx_transport::MockTransport;
 use serde_json::{Value, json};
 
@@ -82,7 +83,41 @@ async fn anthropic_models_list_uses_cursor_and_bearer_headers() {
     assert_eq!(request.uri.path(), "/v1/models");
     assert_eq!(request.uri.query(), Some("limit=10&after_id=cursor-1"));
     assert_eq!(request.headers["x-api-key"], "sk-ant-test");
-    assert_eq!(request.headers["anthropic-version"], "2023-06-01");
+    assert_eq!(request.headers["anthropic-version"], "2026-10-21");
+}
+
+#[tokio::test]
+async fn anthropic_models_list_filters_by_lifecycle() {
+    let mock = MockTransport::new();
+    mock.push_json(
+        200,
+        json!({"data": [{"id": "claude-sonnet-4-5", "type": "model", "lifecycle": "active"}]})
+            .to_string(),
+    );
+
+    let client = Client::builder()
+        .transport(mock.clone())
+        .anthropic()
+        .api_key("sk-ant-test")
+        .build()
+        .expect("client");
+
+    let page = client
+        .models()
+        .list(
+            AnthropicListModelsRequest::builder()
+                .limit(5)
+                .lifecycle([ModelLifecycle::Active])
+                .build(),
+        )
+        .await
+        .expect("list");
+
+    assert_eq!(page.data[0].lifecycle, Some(ModelLifecycle::Active));
+    assert_eq!(
+        mock.requests()[0].uri.query(),
+        Some("limit=5&lifecycle[]=active")
+    );
 }
 
 #[tokio::test]

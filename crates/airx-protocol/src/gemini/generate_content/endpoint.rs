@@ -133,7 +133,12 @@ impl Endpoint for GenerateContentEndpoint {
     type Response = GenerateContentResponse;
 
     fn encode(&self, request: &Self::Request) -> Result<HttpRequest, AirxError> {
-        let body = serde_json::to_vec(request)
+        // 官方 REST 把 `model` 标为 required，请求体缺省时按路径写入。
+        let mut request = request.clone();
+        if request.model.is_none() {
+            request.model = Some(model_path(&self.model)?);
+        }
+        let body = serde_json::to_vec(&request)
             .map_err(|error| AirxError::Serialization(SerializationError::from(error)))?;
 
         let mut http = HttpRequest::post(self.uri()?).with_body(body);
@@ -165,11 +170,17 @@ impl StreamingEndpoint for GenerateContentEndpoint {
     type Event = GenerateContentResponse;
 
     fn decode_event(&self, event: RawEvent) -> Result<Option<Self::Event>, AirxError> {
-        if event.data.is_empty() {
+        let data = event.data.trim();
+        if data.is_empty() {
             return Ok(None);
         }
 
-        let value: Value = serde_json::from_str(&event.data)
+        // 官方 generateContent 不发 `[DONE]` 哨兵；部分网关 / 新协议会发，跳过即可。
+        if data == "[DONE]" {
+            return Ok(None);
+        }
+
+        let value: Value = serde_json::from_str(data)
             .map_err(|error| AirxError::Deserialization(DeserializationError::from(error)))?;
 
         if value.get("error").is_some() {

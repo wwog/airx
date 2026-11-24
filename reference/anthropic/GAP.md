@@ -1,14 +1,14 @@
 # Anthropic：官方行为 vs airx 差距分析
 
 - **基准**：`@anthropic-ai/sdk@1.13.0`（npm `latest`，快照 `reference/anthropic/sdk/@anthropic-ai-sdk@1.13.0/`，`api/manifest.json` 记录 117 resource / 399 方法 / 466 条 `*Params` 声明）；官方文档快照 52 页，`docs/meta.json` 生成于 `2026-11-24T01:33:08Z`（`docs/meta.json` `generated_at`），索引源 `platform.claude.com/llms.txt`（`versions.env`）。
-- **airx 侧基准**：`crates/airx-protocol/src/anthropic/**`（约 2.4k 行）+ `crates/airx/src/{anthropic,api,stream,response,options,builder}.rs`，文档 `docs/anthropic.md`、`docs/protocol-support.md`、`docs/compatibility.md`。
+- **airx 侧基准**：`crates/airx-protocol/src/anthropic/**`（14 个文件，3302 行）+ `crates/airx/src/{anthropic,api,stream,response,options,builder}.rs`，文档 `docs/anthropic.md`、`docs/protocol-support.md`、`docs/compatibility.md`。
 - **分析方式**：纯静态阅读 + 本地 JSON 快照脚本化对比；未运行 cargo / 测试。
 
 ## 分析范围 / 不在范围
 
 **在范围**：Messages（create / countTokens / 流式聚合 / tools / thinking / 结构化输出 `output_config.format`）、Messages Batches、Models、Files，以及它们共享的 Header / 版本 / 错误 / 用量语义；门面易用性与文档一致性。
 
-**不在范围**：`beta.*` 命名空间共 **286 / 399** 个方法（agents / sessions / environments / deployments / memoryStores / vaults / bossiness… `api/SUMMARY.md:16-861`）、GA 的组织管理与账号域（`organization.*`、`skills*`、`userProfiles*`，`api/SUMMARY.md:907-1233`）、Managed Agents / Skills / MCP connector 等托管侧能力。对其中少数「会直接影响业务请求体」的 beta 字段（`context_management`、`compaction`、`mcp_servers`、`fallbacks`、`output_format`）只在第 7 节提示，不作为 airx 待办。
+**不在范围**：`beta.*` 命名空间共 **286 / 399** 个方法（agents / sessions / environments / deployments / memoryStores / vaults / dreams / tunnels… `api/SUMMARY.md:16-861`）、GA 的组织管理与账号域（`organization.*`、`skills*`、`userProfiles*`，`api/SUMMARY.md:907-1233`）、Managed Agents / Skills / MCP connector 等托管侧能力。对其中少数「会直接影响业务请求体」的 beta 字段（`context_management`、`compaction`、`mcp_servers`、`fallbacks`、`output_format`）只在第 7 节提示，不作为 airx 待办。
 
 ---
 
@@ -163,7 +163,7 @@ airx `MessagesResponse`（`response.rs:12-38`）：`id, type, role, model, conte
 官方（`messages.d.ts:4806`）：`cache_creation{ephemeral_1h_input_tokens, ephemeral_5m_input_tokens}, cache_creation_input_tokens, cache_read_input_tokens, inference_geo, input_tokens, output_tokens, output_tokens_details{thinking_tokens}, server_tool_use{web_fetch_requests, web_search_requests}, service_tier, speed`。
 airx（`common.rs:86-102`）：`input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens` + `extensions`。
 
-- `output_tokens_details.thinking_tokens`（P1）：官方明确「thinking 按 output 计费，用该字段核对成本」（`extended-thinking.md:306`）。业务要做成本归因只能挖 `extensions`。
+- `output_tokens_details.thinking_tokens`（P1）：官方明确「thinking 按 output 计费，用该字段核对成本」（`extended-thinking.md:296`）。业务要做成本归因只能挖 `extensions`。
 - `cache_creation` 分 5m/1h（P1）：1h 缓存与 5m 缓存单价不同（`prompt-caching.md:828-901`）。
 - `server_tool_use`（P2）、`service_tier`/`speed`/`inference_geo`（P2）。
 
@@ -198,7 +198,7 @@ airx（`common.rs:86-102`）：`input_tokens, output_tokens, cache_creation_inpu
 
 ## 4. 行为差异（默认值、完成语义、错误映射、结构化输出、工具载荷、thinking）
 
-1. **API 版本头（最严重）**。`config.rs:16` 默认 `2023-06-01`；官方当前版本是 `2026-10-21`（`docs/api/versioning.md:4,25`，`docs/api/overview.md:50`），且 `2026-10-21` 的 breaking 变更正好覆盖 airx 已建模的参数：`temperature/top_p/top_k` 移除、`document` 块限制、citations 限制（`versioning.md:35-39`）。`output_config`、`thinking.display`、`adaptive`/`between_tools`、`speed`、`stop_reason=refusal|model_context_window_exceeded` 都只在这个文档面里出现。测试把旧值锁死了（`crates/airx-protocol/tests/anthropic_protocol.rs:40-43`）。
+1. **API 版本头（最严重）**。`config.rs:16` 默认 `2023-06-01`；官方当前版本是 `2026-10-21`（`docs/api/versioning.md:4,25`，`docs/api/overview.md:50`），且 `2026-10-21` 的 breaking 变更正好覆盖 airx 已建模的参数：`temperature/top_p/top_k` 移除、`document` 块限制、citations 限制（`versioning.md:33-35`）。`output_config`、`thinking.display`、`adaptive`/`between_tools`、`speed`、`stop_reason=refusal|model_context_window_exceeded` 都只在这个文档面里出现。测试把旧值锁死了（`crates/airx-protocol/tests/anthropic_protocol.rs:40-43`）。
 2. **`stream` 与 `create` 的组合无保护**。`.stream(true)` 后调 `create()` 会把 SSE 响应体交给 JSON 解码，报 `Deserialization`（`endpoint.rs:61-73`），错误信息不指向「用错了入口」。`stream()` 会强制置位（`anthropic.rs:180`），但反向没有校验。
 3. **`parse_as` 与官方 `parse` 语义不同**。官方 `messages.parse` 接受 schema/`output_format`、注入 `output_config.format`、校验并返回 `parsed_output`（`structured-outputs.md:199,243`）；airx 只是 `serde_json::from_str(response.text())`（`anthropic.rs:148-155`），文档也承认（`docs/anthropic.md:272,517`）。风险是名字暗示了「结构化输出保证」。
 4. **结构化输出的不兼容约束不做前置校验**。官方：与 citations 同时使用返回 400、与 assistant prefill 不兼容（`structured-outputs.md:3069-3070`），切换 format 会使 prompt cache 失效并额外注入 system prompt（`structured-outputs.md:2855-2859`）。airx 全部交给服务端（`docs/anthropic.md` 已说明），可接受，但缺一个「本地快速失败」的开关。
@@ -348,8 +348,8 @@ impl RequestOptions {                     // 或新的 AnthropicRequestOptions
 6. **模型示例认知漂移**：官方 `Model` 联合类型已到 `claude-opus-5-5` / `claude-sonnet-5-5`（`messages.d.ts:3945`），airx 文档示例仍用 `claude-sonnet-4-5`（`docs/anthropic.md:49,184,226,332,430`）。示例不会失效（`(string & {})` 兜底），但会误导新用户对大模型能力的预期。
 7. **认证方式**：`x-api-key` 已被官方描述为「`Authorization` 的 legacy fallback，仍支持」（`docs/api/overview.md:47-48`）。airx 只发 `x-api-key`（`config.rs:118-121`）当前可用，但若要接 OAuth/WIF 短期 token（`Bearer`）就没有入口——属于 P2 的长期项。
 8. **`extensions` 的双刃剑**：`BTreeMap<String, Value>` + `flatten`（`airx-core/src/json/value.rs:10`）能双向保真，但**把已建模字段塞进 extensions 会产出重复 JSON 键**（struct 字段 + flatten 各写一次），语义依赖解析器。文档应明确：extensions 只用于「未建模字段」，已建模字段用类型化入口（`system` / `cache_control` 就是典型受害者）。
-9. **请求体大小限制**：Messages / countTokens 128 MB、Batch 256 MB、Files 500 MB（`docs/api/errors.md:66-72`），airx 不做本地限制，超限得到 413 `request_too_large`；本地提前拒绝（batch 请求条数/文件大小）可减少无效上传。
-10. **schema 漂移的检测**：manifest 有 466 条 `*Params`，airx 只覆盖其中 8 条左右；建议加一个「快照 diff → 生成差异清单」的脚本（`reference/anthropic/scripts/` 已有解析脚本），把「新增字段」变成可审阅的 PR 而不是线上 400。
+9. **请求体大小限制**：Messages / countTokens 128 MB、Batch 256 MB、Files 500 MB（`docs/api/errors.md:43-53`），airx 不做本地限制，超限得到 413 `request_too_large`；本地提前拒绝（batch 请求条数/文件大小）可减少无效上传。
+10. **schema 漂移的检测**：manifest 有 466 条 `*Params` 声明，airx 仅覆盖其中不到 10 条（`MessagesRequest`/`CountTokensRequest`/`ListModelsRequest`/`RetrieveModel`/`ListFilesRequest`/`UploadFileRequest`/`CreateBatchRequest`/`ListBatchesRequest`/`Tool`/`OutputConfig`）；建议加一个「快照 diff → 生成差异清单」的脚本（`reference/anthropic/scripts/` 已有解析脚本），把「新增字段」变成可审阅的 PR 而不是线上 400。
 
 ---
 
@@ -360,7 +360,7 @@ impl RequestOptions {                     // 或新的 AnthropicRequestOptions
 | # | 动作 | 文件位置 | 验收点 |
 | --- | --- | --- | --- |
 | P0-1 | `DEFAULT_API_VERSION` 改 `2026-10-21`，文档同步，保留 `with_api_version` 覆盖 | `crates/airx-protocol/src/anthropic/config.rs:16`；`docs/anthropic.md:82,99` | 新测试断言默认头为 `2026-10-21`；`anthropic_protocol.rs:40-43` 更新；网关场景文档给出显式固定版本的例子 |
-| P0-2 | Files 列表改为 `limit/page/ids`，响应读 `next_page`，`next_cursor()` → `next_page()` | `files.rs:47-76,124-136`；`docs/anthropic.md:420-434` 附近；`docs/protocol-support.md:101-107` | 单测：`GET /v1/files?page=page_1&limit=10`；`FileList{data,next_page:Some}` 能翻第二页；`resources.rs:339` mock 改为官方形状 |
+| P0-2 | Files 列表改为 `limit/page/ids`，响应读 `next_page`，`next_cursor()` → `next_page()` | `files.rs:47-76,124-136`；`docs/anthropic.md:360-380`；`docs/protocol-support.md:101-107` | 单测：`GET /v1/files?page=page_1&limit=10`；`FileList{data,next_page:Some}` 能翻第二页；`resources.rs:339` mock 改为官方形状 |
 | P0-3 | 删除 `FileDeleteResponse.deleted`，改为 `{id, type}` 并保留 `extensions` | `files.rs:79-92`；`anthropic.rs:298-305` 返回类型 | 单测：解析 `{"id":"file_1","type":"file_deleted"}` 无 `deleted` 字段；若为兼容保留，则标注 `#[deprecated]` 并附「官方不返回」注释 |
 
 ### P1（重要的保真度 / 易用性）
@@ -402,12 +402,12 @@ impl RequestOptions {                     // 或新的 AnthropicRequestOptions
 
 | 能力 | 为什么不做 | 业务需要时的替代路径 |
 | --- | --- | --- |
-| 工具执行循环 / tool_use → 执行 → tool_result 自动回传 | 这是 agent runtime，不是协议。airx 的职责边界是「一次请求 = 一个响应」（`docs/anthropic.md:15`）。循环一旦内建，就要接管超时、并发、权限、审计、重试语义，与「请求工具」定位冲突 | 业务自己 `response.tool_uses()` → 执行 → `Message::blocks(Role::User, [ToolResultBlock])` → 再发一次；`docs/anthropic.md:4.3` 已有示例 |
+| 工具执行循环 / tool_use → 执行 → tool_result 自动回传 | 这是 agent runtime，不是协议。airx 的职责边界是「一次请求 = 一个响应」（`docs/anthropic.md:11-17`）。循环一旦内建，就要接管超时、并发、权限、审计、重试语义，与「请求工具」定位冲突 | 业务自己 `response.tool_uses()` → 执行 → `Message::blocks(Role::User, [ToolResultBlock])` → 再发一次；`docs/anthropic.md:4.3` 已有示例 |
 | `beta.messages.toolRunner` / `beta.messages.thread` | 官方这两个是 Agent SDK 形态（`api/SUMMARY.md:154-155`，无 HTTP 端点），本质是编排器 | 用 `stream()` + 自己的循环 |
 | `pause_turn` 自动续跑 | 续跑需要「把 content 原样回传 + 保持 tools + 容器 id」，属于编排决策（要不要继续、继续几次、花多少钱） | airx 提供 `is_paused()` / `container_id()`，业务自行重建请求（`handling-stop-reasons.md:1560-1565`） |
 | Managed Agents / Sessions / Environments / Deployments（beta，`api/SUMMARY.md:16-59,703-758`） | 托管 agent 平台，不是 LLM 请求协议 | 直接调官方 SDK 或 REST |
 | Skills / Memory Stores / Vaults / MCP connector（`beta.skills`、`beta.memoryStores`、`beta.vaults`、`mcp_servers`） | 状态与凭据托管，超出「请求工具」；且全部 beta | 走 `execute(HttpRequest)` 逃生通道或官方 SDK |
-| 组织/账号管理（`organization.*`、`apiKeys`、`rbacGroups`、`spendLimits`、`workspaces`，GA 37 个 resource 中的 34 个） | 控制面 API，与业务 LLM 调用无关 | 管理后台 / 官方 SDK |
+| 组织/账号管理（`organization.*`、`apiKeys`、`rbacGroups`、`spendLimits`、`workspaces`；GA 共 37 个 resource，其中 33 个属于此类） | 控制面 API，与业务 LLM 调用无关 | 管理后台 / 官方 SDK |
 | schema 编译期校验（JSON Schema → Rust 类型生成）、`transform_schema` 等价物 | 会引入重依赖与代码生成，违背「代码清晰」；且 airx 不做 schema 校验是显式设计（`docs/anthropic.md:17`） | 业务侧用 `schemars`/`serde_json::Value` 自管；airx 只负责把 `schema` 放进 `output_config.format` |
 | 客户端 tokenizer / 本地计 token | 官方口径不公开，本地方案必然漂移 | `count_tokens`（补齐 §2.2 字段后即准） |
 | 流式重试 / 事件重放 | SSE 事件不可重放；重试会在服务端产生二次计费 | 文档已明确（`docs/anthropic.md:8.5`）；业务在首事件前自行重试 |

@@ -12,6 +12,22 @@ use crate::openai::common::reasoning::{ReasoningEffort, Verbosity};
 use super::message::ChatMessage;
 use super::tool::{ResponseFormat, Tool, ToolChoice};
 
+/// 提示词缓存选项（Chat）。
+///
+/// 官方仅 `gpt-5.6+` 支持 `mode` / `ttl`；airx 不做模型能力校验。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PromptCacheOptions {
+    /// `implicit`（默认）或 `explicit`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// 缓存断点的最短生命周期（`30m`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
 /// Chat Completions 请求。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatCompletionRequest {
@@ -25,6 +41,12 @@ pub struct ChatCompletionRequest {
     /// 核采样。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
+    /// 频率惩罚（降低重复 token）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    /// 存在惩罚（鼓励新话题）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
     /// 最大输出 token（已弃用；o-series 不兼容，推荐 `max_completion_tokens`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
@@ -40,9 +62,42 @@ pub struct ChatCompletionRequest {
     /// 停止序列。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
+    /// 是否返回对数概率。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<bool>,
+    /// 每个 token 位置返回的候选数（需 `logprobs = true`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_logprobs: Option<u32>,
+    /// 一次返回的候选数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n: Option<u32>,
+    /// 可复现实验的随机种子。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
     /// 终端用户标识。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// 安全标识（官方推荐替代 `user`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_identifier: Option<String>,
+    /// Prompt 缓存键。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    /// Prompt 缓存选项。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_options: Option<PromptCacheOptions>,
+    /// Prompt 缓存保留策略（已弃用；推荐 `prompt_cache_options.ttl`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention: Option<String>,
+    /// 服务等级（`auto` / `default` / `flex` / `priority` 等）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    /// 是否存储本次补全（stored completions 的前置条件）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
+    /// 元数据（键值对，便于审计 / 筛选）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
     /// 工具列表。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
@@ -79,6 +134,9 @@ pub struct StreamOptions {
     /// 最后一个 chunk 是否携带 usage。
     #[serde(default)]
     pub include_usage: bool,
+    /// 是否启用流式混淆（`false` 可省带宽）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_obfuscation: Option<bool>,
 }
 
 /// [`ChatCompletionRequest`] 构建器。
@@ -88,12 +146,25 @@ pub struct ChatCompletionRequestBuilder {
     messages: Vec<ChatMessage>,
     temperature: Option<f32>,
     top_p: Option<f32>,
+    frequency_penalty: Option<f32>,
+    presence_penalty: Option<f32>,
     max_tokens: Option<u32>,
     max_completion_tokens: Option<u32>,
     reasoning_effort: Option<ReasoningEffort>,
     verbosity: Option<Verbosity>,
     stop: Option<Vec<String>>,
+    logprobs: Option<bool>,
+    top_logprobs: Option<u32>,
+    n: Option<u32>,
+    seed: Option<i64>,
     user: Option<String>,
+    safety_identifier: Option<String>,
+    prompt_cache_key: Option<String>,
+    prompt_cache_options: Option<PromptCacheOptions>,
+    prompt_cache_retention: Option<String>,
+    service_tier: Option<String>,
+    store: Option<bool>,
+    metadata: Option<Value>,
     tools: Option<Vec<Tool>>,
     tool_choice: Option<ToolChoice>,
     parallel_tool_calls: Option<bool>,
@@ -131,6 +202,12 @@ impl ChatCompletionRequestBuilder {
         self.message(ChatMessage::system(content))
     }
 
+    /// 追加 developer 消息（o-series / 新模型的系统级指令）。
+    #[must_use]
+    pub fn developer(self, content: impl Into<String>) -> Self {
+        self.message(ChatMessage::developer(content))
+    }
+
     /// 追加 user 消息。
     #[must_use]
     pub fn user(self, content: impl Into<String>) -> Self {
@@ -154,6 +231,20 @@ impl ChatCompletionRequestBuilder {
     #[must_use]
     pub fn top_p(mut self, top_p: f32) -> Self {
         self.top_p = Some(top_p);
+        self
+    }
+
+    /// 设置频率惩罚。
+    #[must_use]
+    pub fn frequency_penalty(mut self, frequency_penalty: f32) -> Self {
+        self.frequency_penalty = Some(frequency_penalty);
+        self
+    }
+
+    /// 设置存在惩罚。
+    #[must_use]
+    pub fn presence_penalty(mut self, presence_penalty: f32) -> Self {
+        self.presence_penalty = Some(presence_penalty);
         self
     }
 
@@ -192,10 +283,87 @@ impl ChatCompletionRequestBuilder {
         self
     }
 
-    /// 设置终端用户标识。
+    /// 是否返回对数概率。
+    #[must_use]
+    pub fn logprobs(mut self, logprobs: bool) -> Self {
+        self.logprobs = Some(logprobs);
+        self
+    }
+
+    /// 设置每个 token 位置返回的候选数。
+    #[must_use]
+    pub fn top_logprobs(mut self, top_logprobs: u32) -> Self {
+        self.top_logprobs = Some(top_logprobs);
+        self
+    }
+
+    /// 设置候选数。
+    #[must_use]
+    pub fn n(mut self, n: u32) -> Self {
+        self.n = Some(n);
+        self
+    }
+
+    /// 设置随机种子（可复现实验）。
+    #[must_use]
+    pub fn seed(mut self, seed: i64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    /// 设置终端用户标识（官方已标记为被 `safety_identifier` 取代）。
     #[must_use]
     pub fn user_id(mut self, user: impl Into<String>) -> Self {
         self.user = Some(user.into());
+        self
+    }
+
+    /// 设置安全标识。
+    #[must_use]
+    pub fn safety_identifier(mut self, identifier: impl Into<String>) -> Self {
+        self.safety_identifier = Some(identifier.into());
+        self
+    }
+
+    /// 设置 Prompt 缓存键。
+    #[must_use]
+    pub fn prompt_cache_key(mut self, key: impl Into<String>) -> Self {
+        self.prompt_cache_key = Some(key.into());
+        self
+    }
+
+    /// 设置 Prompt 缓存选项。
+    #[must_use]
+    pub fn prompt_cache_options(mut self, options: PromptCacheOptions) -> Self {
+        self.prompt_cache_options = Some(options);
+        self
+    }
+
+    /// 设置 Prompt 缓存保留策略（已弃用）。
+    #[must_use]
+    pub fn prompt_cache_retention(mut self, retention: impl Into<String>) -> Self {
+        self.prompt_cache_retention = Some(retention.into());
+        self
+    }
+
+    /// 设置服务等级。
+    #[must_use]
+    pub fn service_tier(mut self, service_tier: impl Into<String>) -> Self {
+        self.service_tier = Some(service_tier.into());
+        self
+    }
+
+    /// 是否存储本次补全（stored completions 前置条件）。
+    #[must_use]
+    pub fn store(mut self, store: bool) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// 设置元数据。
+    #[must_use]
+    pub fn metadata(mut self, metadata: Value) -> Self {
+        self.metadata = Some(metadata);
         self
     }
 
@@ -265,12 +433,25 @@ impl ChatCompletionRequestBuilder {
             messages: self.messages,
             temperature: self.temperature,
             top_p: self.top_p,
+            frequency_penalty: self.frequency_penalty,
+            presence_penalty: self.presence_penalty,
             max_tokens: self.max_tokens,
             max_completion_tokens: self.max_completion_tokens,
             reasoning_effort: self.reasoning_effort,
             verbosity: self.verbosity,
             stop: self.stop,
+            logprobs: self.logprobs,
+            top_logprobs: self.top_logprobs,
+            n: self.n,
+            seed: self.seed,
             user: self.user,
+            safety_identifier: self.safety_identifier,
+            prompt_cache_key: self.prompt_cache_key,
+            prompt_cache_options: self.prompt_cache_options,
+            prompt_cache_retention: self.prompt_cache_retention,
+            service_tier: self.service_tier,
+            store: self.store,
+            metadata: self.metadata,
             tools: self.tools,
             tool_choice: self.tool_choice,
             parallel_tool_calls: self.parallel_tool_calls,
@@ -327,6 +508,7 @@ mod tests {
             .stream(true)
             .stream_options(StreamOptions {
                 include_usage: true,
+                include_obfuscation: None,
             })
             .build()
             .expect("request");
@@ -394,6 +576,120 @@ mod modern_params_tests {
         assert_eq!(value["reasoning_effort"], "high");
         assert_eq!(value["verbosity"], "low");
         assert!(value.get("max_tokens").is_none());
+    }
+}
+
+#[cfg(test)]
+mod production_params_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sampling_params_serialize() {
+        let request = ChatCompletionRequest::builder()
+            .model("gpt-4o-mini")
+            .user("hi")
+            .frequency_penalty(0.25)
+            .presence_penalty(-0.5)
+            .logprobs(true)
+            .top_logprobs(3)
+            .n(2)
+            .seed(42)
+            .build()
+            .expect("request");
+
+        let value = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(value["frequency_penalty"], 0.25);
+        assert_eq!(value["presence_penalty"], -0.5);
+        assert_eq!(value["logprobs"], true);
+        assert_eq!(value["top_logprobs"], 3);
+        assert_eq!(value["n"], 2);
+        assert_eq!(value["seed"], 42);
+    }
+
+    #[test]
+    fn observability_and_storage_params_serialize() {
+        let request = ChatCompletionRequest::builder()
+            .model("gpt-4o-mini")
+            .user("hi")
+            .store(true)
+            .metadata(json!({"trace": "t-1"}))
+            .service_tier("flex")
+            .safety_identifier("user-hash")
+            .build()
+            .expect("request");
+
+        let value = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(value["store"], true);
+        assert_eq!(value["metadata"]["trace"], "t-1");
+        assert_eq!(value["service_tier"], "flex");
+        assert_eq!(value["safety_identifier"], "user-hash");
+    }
+
+    #[test]
+    fn prompt_cache_params_serialize() {
+        let request = ChatCompletionRequest::builder()
+            .model("gpt-5.6")
+            .user("hi")
+            .prompt_cache_key("cache-1")
+            .prompt_cache_options(PromptCacheOptions {
+                mode: Some("explicit".to_owned()),
+                ttl: Some("30m".to_owned()),
+                extensions: Extensions::new(),
+            })
+            .prompt_cache_retention("24h")
+            .build()
+            .expect("request");
+
+        let value = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(value["prompt_cache_key"], "cache-1");
+        assert_eq!(value["prompt_cache_options"]["mode"], "explicit");
+        assert_eq!(value["prompt_cache_options"]["ttl"], "30m");
+        assert_eq!(value["prompt_cache_retention"], "24h");
+    }
+
+    #[test]
+    fn new_params_are_omitted_when_unset() {
+        let request = ChatCompletionRequest::builder()
+            .model("m")
+            .user("hi")
+            .build()
+            .expect("request");
+        let value = serde_json::to_value(&request).expect("serialize");
+        for key in [
+            "frequency_penalty",
+            "presence_penalty",
+            "logprobs",
+            "top_logprobs",
+            "n",
+            "seed",
+            "store",
+            "metadata",
+            "service_tier",
+            "safety_identifier",
+            "prompt_cache_key",
+            "prompt_cache_options",
+            "prompt_cache_retention",
+        ] {
+            assert!(value.get(key).is_none(), "{key} should be omitted");
+        }
+    }
+
+    #[test]
+    fn stream_include_obfuscation_serializes() {
+        let request = ChatCompletionRequest::builder()
+            .model("m")
+            .user("hi")
+            .stream(true)
+            .stream_options(StreamOptions {
+                include_usage: true,
+                include_obfuscation: Some(false),
+            })
+            .build()
+            .expect("request");
+        let value = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(value["stream_options"]["include_usage"], true);
+        assert_eq!(value["stream_options"]["include_obfuscation"], false);
     }
 }
 

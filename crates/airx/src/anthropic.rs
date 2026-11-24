@@ -6,11 +6,13 @@
 use std::sync::Arc;
 
 use airx_core::AirxError;
+use airx_core::error::ConfigurationError;
 use airx_core::http::{HttpRequest, HttpResponse};
 use airx_core::model::ModelId;
 use airx_protocol::anthropic::AnthropicConfig;
 use airx_protocol::anthropic::batches::{
-    BatchEndpoint, BatchList, BatchResultsEndpoint, CreateBatchEndpoint, CreateBatchRequest,
+    BatchEndpoint, BatchList, BatchResultLine, BatchResultsEndpoint, BatchResultsTypedEndpoint,
+    CreateBatchEndpoint, CreateBatchRequest, DeleteBatchEndpoint, DeletedBatch,
     ListBatchesEndpoint, ListBatchesRequest, MessageBatch,
 };
 use airx_protocol::anthropic::files::{
@@ -133,7 +135,11 @@ impl Messages {
     }
 
     /// 创建一次非流式消息。
+    ///
+    /// 请求里 `stream == true` 时直接返回 `Configuration` 错误：SSE 响应体交给 JSON
+    /// 解码只会得到难以定位的 `Deserialization`，应改用 [`Messages::stream`]。
     pub async fn create(&self, request: MessagesRequest) -> Result<MessagesResponse, AirxError> {
+        reject_streaming(&request)?;
         self.api.create_with(&request, &self.options).await
     }
 
@@ -142,10 +148,15 @@ impl Messages {
         &self,
         request: MessagesRequest,
     ) -> Result<WithMeta<MessagesResponse>, AirxError> {
+        reject_streaming(&request)?;
         self.api.create_with_meta(&request, &self.options).await
     }
 
     /// 创建并解析结构化输出。
+    ///
+    /// 与官方 `messages.parse` 不同：**不注入也不校验 schema**，只做
+    /// `serde_json::from_str(response.text())`。schema 仍要通过
+    /// `.output_format(JsonOutputFormat::new(schema))` 交给模型。
     pub async fn parse_as<T: DeserializeOwned>(
         &self,
         request: MessagesRequest,
@@ -179,6 +190,62 @@ impl Messages {
     ) -> Result<ProtocolStream<MessagesEndpoint>, AirxError> {
         request.stream = Some(true);
         self.api.stream_with(&request, &self.options).await
+    }
+}
+
+/// 非流式入口拒绝 `stream = true`。
+fn reject_streaming(request: &MessagesRequest) -> Result<(), AirxError> {
+    if request.stream == Some(true) {
+        return Err(AirxError::Configuration(ConfigurationError::new(
+            "MessagesRequest.stream=true 需要走 messages().stream()；create() 只解码普通 JSON 响应",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "stream")]
+impl ProtocolStream<MessagesEndpoint> {
+    /// 消费整个流；流内错误 / 截断时保留已累积的部分响应。
+    ///
+    /// 返回 `(部分响应, 错误)`：`error` 为 `None` 仅表示流以 `message_stop`
+    /// 正常结束。官方明确流内 `error` 不遵循 HTTP 语义，业务常需要
+    /// 「部分结果 + 错误」。
+    pub async fn final_response_partial(mut self) -> (MessagesResponse, Option<AirxError>) {
+        use airx_core::error::StreamError;
+        use airx_core::stream::StreamStatus;
+
+        let mut accumulator = airx_protocol::anthropic::messages::MessagesStreamAccumulator::new();
+        let mut failure = None;
+        loop {
+            match self.next().await {
+                Ok(Some(event)) => {
+                    if let Err(error) = accumulator.apply(event) {
+                        failure = Some(error);
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        if failure.is_none() {
+            failure = match accumulator.status() {
+                StreamStatus::Completed => None,
+                StreamStatus::Failed => Some(AirxError::Stream(StreamError::failed(
+                    accumulator
+                        .failure_message()
+                        .unwrap_or("Anthropic 流内错误")
+                        .to_owned(),
+                ))),
+                _ => Some(AirxError::Stream(StreamError::incomplete(
+                    "未收到 message_stop，流已提前结束",
+                ))),
+            };
+        }
+        (accumulator.finish_partial(), failure)
     }
 }
 
@@ -228,6 +295,7 @@ impl AnthropicModels {
                     limit: request.limit,
                     after_id: after_id.clone(),
                     before_id: request.before_id.clone(),
+                    lifecycle: request.lifecycle.clone(),
                 })
                 .await?;
 
@@ -266,8 +334,34 @@ impl AnthropicFiles {
         mime_type: impl Into<String>,
         data: impl Into<Bytes>,
     ) -> Result<FileMetadata, AirxError> {
+        self.upload_request(UploadFileRequest::new(
+            filename,
+            mime_type,
+            data,
+            crate::multipart::boundary(),
+        ))
+        .await
+    }
+
+    /// 上传文件并让它在 `expires_in_seconds` 后过期（官方区间 3600–7776000 秒）。
+    pub async fn upload_with_expiry(
+        &self,
+        filename: impl Into<String>,
+        mime_type: impl Into<String>,
+        data: impl Into<Bytes>,
+        expires_in_seconds: u32,
+    ) -> Result<FileMetadata, AirxError> {
         let request =
-            UploadFileRequest::new(filename, mime_type, data, crate::multipart::boundary());
+            UploadFileRequest::new(filename, mime_type, data, crate::multipart::boundary())
+                .with_expires_in_seconds(expires_in_seconds);
+        self.upload_request(request).await
+    }
+
+    /// 用完整 [`UploadFileRequest`] 上传（自定义 boundary / 过期时间）。
+    pub async fn upload_request(
+        &self,
+        request: UploadFileRequest,
+    ) -> Result<FileMetadata, AirxError> {
         let api = ApiClient::new(
             UploadFileEndpoint::new(self.config.clone()),
             Arc::clone(&self.executor),
@@ -373,6 +467,31 @@ impl AnthropicBatches {
     pub async fn results(&self, id: impl Into<String>) -> Result<Bytes, AirxError> {
         let api = ApiClient::new(
             BatchResultsEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+
+    /// 获取结果并逐行解析为 [`BatchResultLine`]。
+    ///
+    /// 原始 JSONL 仍可用 [`AnthropicBatches::results`] 取得。
+    pub async fn results_typed(
+        &self,
+        id: impl Into<String>,
+    ) -> Result<Vec<BatchResultLine>, AirxError> {
+        let api = ApiClient::new(
+            BatchResultsTypedEndpoint::new(self.config.clone()),
+            Arc::clone(&self.executor),
+        );
+        let id = id.into();
+        api.create_with(&id, &self.options).await
+    }
+
+    /// 删除批处理。
+    pub async fn delete(&self, id: impl Into<String>) -> Result<DeletedBatch, AirxError> {
+        let api = ApiClient::new(
+            DeleteBatchEndpoint::new(self.config.clone()),
             Arc::clone(&self.executor),
         );
         let id = id.into();

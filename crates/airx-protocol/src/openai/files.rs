@@ -39,9 +39,43 @@ pub struct FileObject {
     /// 状态。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// 状态详情（已弃用；fine-tuning 失败原因）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_details: Option<String>,
+    /// 过期时间（Unix 秒）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
+}
+
+/// 文件过期策略。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpiresAfter {
+    /// 锚点时间（目前只支持 `created_at`）。
+    #[serde(default = "created_at_anchor")]
+    pub anchor: String,
+    /// 锚点之后的秒数（3600 ~ 2592000）。
+    pub seconds: u32,
+    /// 未识别的扩展字段。
+    #[serde(flatten)]
+    pub extensions: Extensions,
+}
+
+impl ExpiresAfter {
+    /// 以 `created_at` 为锚点构造。
+    pub fn after_seconds(seconds: u32) -> Self {
+        Self {
+            anchor: created_at_anchor(),
+            seconds,
+            extensions: Extensions::new(),
+        }
+    }
+}
+
+fn created_at_anchor() -> String {
+    "created_at".to_owned()
 }
 
 /// 文件列表。
@@ -92,6 +126,8 @@ pub struct UploadFileRequest {
     pub purpose: String,
     /// 文件内容。
     pub data: Bytes,
+    /// 过期策略。
+    pub expires_after: Option<ExpiresAfter>,
     /// multipart boundary。
     pub boundary: String,
 }
@@ -108,8 +144,16 @@ impl UploadFileRequest {
             filename: filename.into(),
             purpose: purpose.into(),
             data: data.into(),
+            expires_after: None,
             boundary: boundary.into(),
         }
+    }
+
+    /// 设置过期策略。
+    #[must_use]
+    pub fn with_expires_after(mut self, expires_after: ExpiresAfter) -> Self {
+        self.expires_after = Some(expires_after);
+        self
     }
 }
 
@@ -125,6 +169,9 @@ pub struct ListFilesRequest {
     /// 从该 ID 之后开始。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
+    /// 排序（`asc` / `desc`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<String>,
 }
 
 impl ListFilesRequest {
@@ -140,6 +187,7 @@ pub struct ListFilesRequestBuilder {
     purpose: Option<String>,
     limit: Option<u32>,
     after: Option<String>,
+    order: Option<String>,
 }
 
 impl ListFilesRequestBuilder {
@@ -164,12 +212,20 @@ impl ListFilesRequestBuilder {
         self
     }
 
+    /// 排序（`asc` / `desc`）。
+    #[must_use]
+    pub fn order(mut self, order: impl Into<String>) -> Self {
+        self.order = Some(order.into());
+        self
+    }
+
     /// 构建。
     pub fn build(self) -> ListFilesRequest {
         ListFilesRequest {
             purpose: self.purpose,
             limit: self.limit,
             after: self.after,
+            order: self.order,
         }
     }
 }
@@ -196,14 +252,20 @@ impl Endpoint for UploadFileEndpoint {
     type Response = FileObject;
 
     fn encode(&self, request: &Self::Request) -> Result<HttpRequest, AirxError> {
-        let form = MultipartForm::new(request.boundary.clone())?
-            .text("purpose", request.purpose.clone())
-            .file(
-                "file",
-                request.filename.clone(),
-                "application/octet-stream",
-                request.data.clone(),
-            );
+        let mut form =
+            MultipartForm::new(request.boundary.clone())?.text("purpose", request.purpose.clone());
+        if let Some(expires_after) = &request.expires_after {
+            // 官方 SDK 的 multipart 嵌套字段使用 `field[sub]` 形式。
+            form = form
+                .text("expires_after[anchor]", expires_after.anchor.clone())
+                .text("expires_after[seconds]", expires_after.seconds.to_string());
+        }
+        let form = form.file(
+            "file",
+            request.filename.clone(),
+            "application/octet-stream",
+            request.data.clone(),
+        );
         let body = form.body()?;
         let mut http = HttpRequest::post(self.uri()?).with_body(body);
         http.headers.insert(
@@ -245,6 +307,9 @@ impl ListFilesEndpoint {
         }
         if let Some(after) = &request.after {
             query.push(format!("after={}", query_value(after, "after")?));
+        }
+        if let Some(order) = &request.order {
+            query.push(format!("order={}", query_value(order, "order")?));
         }
         let path = if query.is_empty() {
             FILES_PATH.to_owned()
@@ -429,11 +494,50 @@ mod tests {
             "object": "file",
             "bytes": 10,
             "filename": "a.jsonl",
-            "purpose": "batch"
+            "purpose": "batch",
+            "expires_at": 1730000000,
+            "status_details": "ok"
         }))
         .expect("file");
         assert_eq!(file.id, "file-1");
         assert_eq!(file.purpose.as_deref(), Some("batch"));
+        assert_eq!(file.expires_at, Some(1730000000));
+        assert_eq!(file.status_details.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn list_request_encodes_order() {
+        let endpoint = ListFilesEndpoint::new(OpenAiConfig::new("sk-test"));
+        let request = ListFilesRequest::builder()
+            .purpose("batch")
+            .order("desc")
+            .build();
+        let http = endpoint.encode(&request).expect("encode");
+        assert_eq!(http.uri.query(), Some("purpose=batch&order=desc"));
+    }
+
+    #[test]
+    fn upload_encodes_expires_after_as_nested_multipart_fields() {
+        let endpoint = UploadFileEndpoint::new(OpenAiConfig::new("sk-test"));
+        let request = UploadFileRequest::new("a.jsonl", "batch", b"x".to_vec(), "BOUNDARY")
+            .with_expires_after(ExpiresAfter::after_seconds(3600));
+        let http = endpoint.encode(&request).expect("encode");
+        let body = String::from_utf8_lossy(&http.body);
+        assert!(body.contains("name=\"expires_after[anchor]\""));
+        assert!(body.contains("created_at"));
+        assert!(body.contains("name=\"expires_after[seconds]\""));
+        assert!(body.contains("3600"));
+    }
+
+    #[test]
+    fn expires_after_defaults_to_created_at_anchor() {
+        let expires: ExpiresAfter =
+            serde_json::from_value(json!({"seconds": 3600})).expect("parse");
+        assert_eq!(expires.anchor, "created_at");
+        assert_eq!(
+            serde_json::to_value(&expires).expect("serialize"),
+            json!({"anchor": "created_at", "seconds": 3600})
+        );
     }
 
     #[test]

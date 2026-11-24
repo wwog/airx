@@ -39,6 +39,35 @@ impl ChatCompletionResponse {
     pub fn first_content(&self) -> Option<&str> {
         self.choices.first()?.message.text()
     }
+
+    /// 第一个候选的结束原因（`stop` / `length` / `tool_calls` / `content_filter` …）。
+    pub fn finish_reason(&self) -> Option<&str> {
+        self.choices.first()?.finish_reason.as_deref()
+    }
+
+    /// 是否因输出长度上限截断。
+    pub fn is_truncated(&self) -> bool {
+        self.choices.first().is_some_and(ChatChoice::is_truncated)
+    }
+
+    /// 是否请求了工具调用。
+    pub fn is_tool_use(&self) -> bool {
+        self.choices.first().is_some_and(ChatChoice::is_tool_use)
+    }
+
+    /// 是否因内容过滤结束。
+    pub fn is_content_filtered(&self) -> bool {
+        self.choices
+            .first()
+            .is_some_and(ChatChoice::is_content_filtered)
+    }
+
+    /// 是否返回了拒答（`refusal`）。
+    pub fn is_refusal(&self) -> bool {
+        self.choices
+            .first()
+            .is_some_and(|choice| choice.message.refusal.is_some())
+    }
 }
 
 /// 单个候选。
@@ -57,4 +86,24 @@ pub struct ChatChoice {
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
+}
+
+impl ChatChoice {
+    /// 是否因输出长度上限截断。
+    pub fn is_truncated(&self) -> bool {
+        self.finish_reason.as_deref() == Some("length")
+    }
+
+    /// 是否请求了工具调用（`tool_calls` 或旧版 `function_call`）。
+    pub fn is_tool_use(&self) -> bool {
+        matches!(
+            self.finish_reason.as_deref(),
+            Some("tool_calls" | "function_call")
+        )
+    }
+
+    /// 是否因内容过滤结束。
+    pub fn is_content_filtered(&self) -> bool {
+        self.finish_reason.as_deref() == Some("content_filter")
+    }
 }

@@ -114,21 +114,29 @@ Anthropic-Compatible 部署请使用 Anthropic Native API。`thinking` /
 ## 6. Gemini 行为约定
 
 - **模型在路径中**：`gemini.generate_content(model)` 决定
-  `/models/{model}:generateContent`；请求体不含 `model`。裸模型名会补 `models/`
-  前缀，`models/…` / `tunedModels/…` / `publishers/…` 原样使用。
+  `/models/{model}:generateContent`；请求体也会写入 `model`（与官方 REST 参考一致），
+  可用 `model_id` 覆盖。裸模型名会补 `models/` 前缀，`models/…` / `tunedModels/…` /
+  `publishers/…` 原样使用。
 - **认证**：使用 `x-goog-api-key` Header，不把 key 放进 query，避免出现在日志与 URL 中。
 - **流式**：请求 `alt=sse`；每个 SSE data 是一个 `GenerateContentResponse` 增量。
-  没有 `[DONE]`：完成信号是候选的 `finishReason`，输入被拦截时是
-  `promptFeedback.blockReason`；两者都没有时聚合器返回 `Incomplete`。
+  没有 `[DONE]` 哨兵（出现时跳过）。完成信号是**所有候选**的终态 `finishReason`，
+  输入被拦截时是 `promptFeedback.blockReason`；`CONTINUATION` 需要回传
+  `continuationToken` 续跑，不算完成；两者都没有时聚合器返回 `Incomplete`。
 - **thinking**：`text` 片段可带 `thought: true`；`Content::text()` 只拼接非 thinking
-  文本，`thought_text()` 单独提供。多轮工具调用需要回传 `thoughtSignature`（已建模）。
+  文本，`thought_text()` 单独提供。`thoughtSignature` 是 **Part 级**字段（与
+  `functionCall` / `inlineData` 同级）；多轮工具调用需原样回传。
 - **工具**：`functionCall.args` 在 Gemini 中是完整 JSON 对象（不是增量字符串）；
-  聚合器按片段原样保留。服务端工具通过 `Tool::server` 声明，airx 不代发网络请求。
+  聚合器按片段原样保留。`FunctionCallingMode` 支持 `VALIDATED`。服务端工具通过
+  `Tool::server` 声明，airx 不代发网络请求。
 - **安全拦截**：HTTP 200 + `promptFeedback.blockReason` 是正常响应，不是错误；
-  调用方应检查 `prompt_feedback` 与 `finish_reason`。
-- **未知结构**：未知 `Part` / 字段保留为 `Part::Other` 或 `extensions`，重新序列化不丢失。
-- **未封装**：Gemini Files、Batches、Vertex AI 专属参数、Live API（可用 `extensions`、
-  `execute(HttpRequest)` 或原生 `Endpoint` 逃生通道）。
+  调用方应检查 `prompt_feedback`、`finish_reason`，或使用 `is_blocked()` /
+  `is_truncated()` / `requires_continuation()`。
+- **未知结构**：未知 `Part` / 字段保留为 `Part::Other` 或各变体 `extensions`（含
+  Part 级未知兄弟键），重新序列化不丢失。
+- **已封装**：`generateContent` / `streamGenerateContent`、`countTokens` /
+  `computeTokens`、`embedContent` / `batchEmbedContents`、Models、`cachedContents` CRUD。
+- **未封装**：Gemini Files、Batches、Interactions、Live API、Vertex AI 专属参数
+  （可用 `extensions`、`execute(HttpRequest)` 或原生 `Endpoint` 逃生通道）。
 
 ## 7. 服务端联网工具
 
@@ -143,21 +151,23 @@ Anthropic-Compatible 部署请使用 Anthropic Native API。`thinking` /
 
 ## 8. 参数随模型变化（2026-11 对齐）
 
-- **Anthropic**：最新 Messages API 已移除 `temperature` / `top_p` / `top_k`。
+- **Anthropic**：默认 API 版本 `2026-10-21`（`with_api_version` 可覆盖；兼容网关请显式固定）。
+  最新 Messages API 已移除 `temperature` / `top_p` / `top_k`。
   用 `output_config.effort` 控制推理投入，用 `output_config.format` 做结构化输出。
   `thinking` 支持 `enabled`（预算）/ `disabled` / `between_tools` / `adaptive`。
 - **OpenAI Chat**：`max_tokens` 已标记 deprecated，且与 o-series 不兼容；
-  新代码使用 `max_completion_tokens`（包含推理 token）。`reasoning_effort` 取值
+  新代码使用 `max_completion_tokens`（包含推理 token）。`user` 字段已弃用，优先
+  `safety_identifier` / `prompt_cache_key`。`reasoning_effort` 取值
   `none|minimal|low|medium|high|xhigh|max`（模型相关），`verbosity` 取值 `low|medium|high`。
 - **OpenAI Responses**：使用 `max_output_tokens`；推理用 `reasoning.effort`；
-  结构化输出用 `text.format`（`json_schema`）。
+  结构化输出用 `text.format`（`json_schema`）；生命周期新增 `compact`。
 - **DeepSeek**：当前文档模型为 `deepseek-flash` / `deepseek-v4-pro`；
   `reasoning_effort` 取 `none|low|high|max`（`minimal→low`，`medium/xhigh→high`）；
   `response_format` 不支持 `json_schema`。
 - **Gemini**：2.5 系列用 `thinkingConfig.thinkingBudget`（`-1` 动态、`0` 关闭），
-  3 系列用 `thinkingLevel`；结构化输出用 `generationConfig.responseMimeType =
-  application/json` + `responseSchema` / `responseJsonSchema`。采样参数
-  （`temperature` / `topP` / `topK`）仍在 `generationConfig` 中。
+  3 系列用 `thinkingLevel`；结构化输出优先写 `generationConfig.responseJsonSchema`
+  （`responseSchema` 已被官方 SDK 标 deprecated）。`temperature` / `topP` / `topK`
+  字段仍在，但 Gemini 3.6+/4 起官方会忽略并在未来版本拒绝，新代码不要依赖采样参数。
 
 参数对齐会随官方版本演进；发现模型行为变化时，优先更新本节与
 [protocol-support.md](protocol-support.md)，再改代码。
@@ -190,11 +200,14 @@ while let Some(event) = stream.try_next().await? { /* ... */ }
 ```
 
 - `ProtocolStream` 实现 `futures_core::Stream`，可直接使用 `TryStreamExt`、`select!`。
-- 各协议提供 `final_response()` / `final_text()`，内部驱动对应 Accumulator。
-- 模型列表：`client.models().list() / retrieve()`；Anthropic / Gemini 支持 `list_all()`。
-- 计 token：Anthropic `messages().count_tokens()`、Gemini `generate_content(m).count_tokens()`。
-- 文件 / 批处理 / Embeddings：OpenAI `files/batches/embeddings`、Anthropic `files/batches`、
-  Gemini `embed_content`；上传使用 multipart。
+- 各协议提供 `final_response()` / `final_text()` / `final_parsed::<T>()`，内部驱动对应
+  Accumulator；流内失败时可取部分结果（`finish_partial()` / `final_response_partial()`）。
+- 模型列表：OpenAI `models().list() / retrieve() / delete()`；Anthropic `models().list() /
+  retrieve()` + `list_all()`；Gemini `models().list() / get()` + `list_all()`。
+- 计 token：Anthropic `messages().count_tokens()`；Gemini `generate_content(m).count_tokens()` /
+  `compute_tokens()`。
+- 文件 / 批处理 / Embeddings：OpenAI `files/batches/embeddings/moderations`、Anthropic
+  `files/batches`、Gemini `embed_content` 与 `caches()`；上传使用 multipart。
 - 完整历史输入：Chat / Messages 的 `.messages(...)`、Gemini `.contents(...)`、
   Responses `.input_items(...)`。
 - raw execute：`OpenAi/Anthropic/Gemini::execute(HttpRequest)` 复用认证、重试、超时与压缩。

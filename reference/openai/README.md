@@ -4,7 +4,7 @@
 npm 包裁剪出的类型声明 + 由这两者静态分析出的全量接口清单。
 
 它不参与 Cargo 构建，也不是运行时依赖。要确认「某个参数/接口官方怎么写」时看这里，
-不要凭记忆。
+不要凭记忆。与 airx 实现的逐项差距见 [`GAP.md`](GAP.md)。
 
 **入库的只有脚本与说明**（`README.md`、`update.sh`、`versions.env`、`scripts/*`）；
 `docs/`、`sdk/`、`api/` 全是 `./update.sh` 在本地生成的产物，已由根 `.gitignore`

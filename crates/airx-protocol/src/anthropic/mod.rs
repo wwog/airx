@@ -7,5 +7,8 @@ pub mod files;
 pub mod messages;
 pub mod models;
 
-pub use common::Usage;
-pub use config::AnthropicConfig;
+pub use common::{
+    CacheCreation, OutputTokensDetails, RequestServiceTier, ServerToolUsage, ServiceTier, Speed,
+    Usage,
+};
+pub use config::{AnthropicConfig, AuthScheme};

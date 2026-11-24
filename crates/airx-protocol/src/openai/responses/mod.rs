@@ -19,18 +19,25 @@ pub use event::{
     ResponsesEvent, ServerToolCallEvent,
 };
 pub use request::{
-    InputContent, InputItem, InputMessageContent, Reasoning, ResponsesInput, ResponsesRequest,
-    ResponsesRequestBuilder, TextConfig, TextFormat,
+    ContextManagement, InputContent, InputItem, InputMessageContent, Prompt, PromptCacheOptions,
+    Reasoning, ResponsesInput, ResponsesRequest, ResponsesRequestBuilder, ResponsesStreamOptions,
+    TextConfig, TextFormat,
 };
 pub use resources::{
-    CancelResponseEndpoint, CountInputTokensEndpoint, DeleteResponse, DeleteResponseEndpoint,
-    InputItemList, InputTokensCount, InputTokensCountRequest, InputTokensCountRequestBuilder,
+    CancelResponseEndpoint, CompactRequest, CompactRequestBuilder, CompactResponseEndpoint,
+    CountInputTokensEndpoint, DeleteResponse, DeleteResponseEndpoint, InputItemList,
+    InputTokensCount, InputTokensCountRequest, InputTokensCountRequestBuilder,
     ListInputItemsEndpoint, ListInputItemsRequest, RetrieveResponseEndpoint,
+    RetrieveResponseOptions, RetrieveResponseRequest,
 };
 pub use response::{
-    Annotation, CodeInterpreterCallItem, FileSearchCallItem, FunctionCallItem,
-    ImageGenerationCallItem, McpCallItem, MessageItem, OutputContent, OutputItem, OutputText,
-    ReasoningItem, RefusalContent, ResponsesResponse, ResponsesUsage, UrlCitation,
-    WebSearchCallItem,
+    Annotation, CodeInterpreterCallItem, CompactionItem, ContainerFileCitation, CustomToolCallItem,
+    FileCitation, FilePath, FileSearchCallItem, FunctionCallItem, ImageGenerationCallItem,
+    McpCallItem, MessageItem, OutputContent, OutputItem, OutputText, PromptCacheDiagnostics,
+    ReasoningItem, RefusalContent, ResponsesResponse, ResponsesUsage, ToolUsage, ToolUsageImageGen,
+    ToolUsageWebSearch, UrlCitation, WebSearchCallItem,
 };
-pub use tool::{ResponsesTool, SearchContextSize, WebSearchFilters, WebSearchKind, WebSearchTool};
+pub use tool::{
+    ResponsesFunctionTool, ResponsesTool, ResponsesToolChoice, SearchContextSize, WebSearchFilters,
+    WebSearchKind, WebSearchTool,
+};
