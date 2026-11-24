@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [lints]
 workspace = true
@@ -17,7 +18,7 @@ gemini = []
 stream = []
 
 [dependencies]
-airx-core = { path = "../airx-core", default-features = false }
+airx-core = { version = "0.1.0", path = "../airx-core", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 bytes.workspace = true

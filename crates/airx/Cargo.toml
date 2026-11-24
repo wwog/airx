@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [lints]
 workspace = true
@@ -31,9 +32,9 @@ all-providers = ["openai", "anthropic", "gemini"]
 stream = ["airx-core/stream", "airx-protocol/stream", "airx-transport/stream"]
 
 [dependencies]
-airx-core = { path = "../airx-core", default-features = false }
-airx-protocol = { path = "../airx-protocol", default-features = false }
-airx-transport = { path = "../airx-transport", default-features = false }
+airx-core = { version = "0.1.0", path = "../airx-core", default-features = false }
+airx-protocol = { version = "0.1.0", path = "../airx-protocol", default-features = false }
+airx-transport = { version = "0.1.0", path = "../airx-transport", default-features = false }
 futures-core.workspace = true
 futures-util.workspace = true
 serde.workspace = true
