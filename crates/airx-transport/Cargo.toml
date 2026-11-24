@@ -1,6 +1,7 @@
 [package]
 name = "airx-transport"
 description = "airx 传输层：HTTP 执行、流式读取、超时取消、重试与中间件"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -29,7 +30,7 @@ wasm = [
 stream = []
 
 [dependencies]
-airx-core = { version = "0.1.0", path = "../airx-core", default-features = false }
+airx-core = { version = "0.1.1", path = "../airx-core", default-features = false }
 bytes.workspace = true
 http.workspace = true
 futures-core.workspace = true
