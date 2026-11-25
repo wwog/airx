@@ -22,7 +22,6 @@ pub use airx_core::airx_log;
 pub use airx_core::http::{HeaderMap, HeaderName, HeaderValue};
 pub use airx_core::log::{LogConfig, LogHandle, LogLevel, Logger, Record, Scope};
 pub use airx_core::{AirxError, ApiVersion, ModelId, ProviderId};
-pub use bytes::Bytes;
 #[cfg(feature = "anthropic")]
 pub use airx_protocol::anthropic::batches::{
     BatchList as AnthropicBatchList, BatchRequestItem,
@@ -127,6 +126,7 @@ pub use airx_protocol::openai::responses::{
     TextConfig, TextFormat, ToolUsage,
 };
 pub use airx_transport::RetryPolicy;
+pub use bytes::Bytes;
 
 #[cfg(feature = "stream")]
 pub use crate::ProtocolStream;

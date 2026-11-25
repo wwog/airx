@@ -37,6 +37,8 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
+use crate::http::HeaderMap;
+
 /// 日志级别。
 ///
 /// 顺序即过滤强度：配置某个级别表示输出该级别及更严重的级别
@@ -124,6 +126,8 @@ pub enum FieldValue<'a> {
     Display(&'a dyn fmt::Display),
     /// 错误值；保证保留 source 链的 `Display` 形态。
     Error(&'a (dyn std::error::Error + 'static)),
+    /// 任何 [`fmt::Debug`] 值（类型化事件等没有 `Display` 的结构）。
+    Debug(&'a dyn fmt::Debug),
 }
 
 impl fmt::Display for FieldValue<'_> {
@@ -131,6 +135,7 @@ impl fmt::Display for FieldValue<'_> {
         match self {
             Self::Display(value) => fmt::Display::fmt(value, f),
             Self::Error(error) => fmt::Display::fmt(error, f),
+            Self::Debug(value) => fmt::Debug::fmt(value, f),
         }
     }
 }
@@ -158,6 +163,14 @@ impl<'a> Field<'a> {
         Self {
             key,
             value: FieldValue::Error(error),
+        }
+    }
+
+    /// 以 [`fmt::Debug`] 值构造字段。
+    pub fn debug<T: fmt::Debug>(key: &'static str, value: &'a T) -> Self {
+        Self {
+            key,
+            value: FieldValue::Debug(value),
         }
     }
 }
@@ -221,14 +234,41 @@ pub trait Logger: Send + Sync {
     fn log(&self, record: &Record<'_>);
 }
 
+/// 自定义 Header 脱敏 / 渲染回调：拿到全量 HeaderMap，返回写入日志的文本。
+pub type HeaderRedactor = Arc<dyn Fn(&HeaderMap) -> String + Send + Sync>;
+
 /// scope → 级别 的过滤配置。
 ///
 /// 查找规则：精确匹配 scope 优先，未匹配时回退到 [`LogConfig::default_level`]。
 /// 不做前缀继承（`net` 不会自动覆盖 `net.http`），保证规则可预测。
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub struct LogConfig {
     default_level: LogLevel,
     scopes: Vec<(Scope, LogLevel)>,
+    body_limit: usize,
+    header_redactor: Option<HeaderRedactor>,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            default_level: LogLevel::Off,
+            scopes: Vec::new(),
+            body_limit: DEFAULT_BODY_LIMIT,
+            header_redactor: None,
+        }
+    }
+}
+
+impl fmt::Debug for LogConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LogConfig")
+            .field("default_level", &self.default_level)
+            .field("scopes", &self.scopes)
+            .field("body_limit", &self.body_limit)
+            .field("header_redactor", &self.header_redactor.is_some())
+            .finish()
+    }
 }
 
 impl LogConfig {
@@ -241,7 +281,7 @@ impl LogConfig {
     pub fn all(level: LogLevel) -> Self {
         Self {
             default_level: level,
-            scopes: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -273,6 +313,126 @@ impl LogConfig {
             .find(|(candidate, _)| *candidate == scope)
             .map(|(_, level)| *level)
             .unwrap_or(self.default_level)
+    }
+
+    /// Debug 级别下 body 预览的上限（字节）；`Trace` 不受该上限限制。
+    #[must_use]
+    pub fn body_limit(mut self, bytes: usize) -> Self {
+        self.body_limit = bytes;
+        self
+    }
+
+    /// 当前 body 预览上限。
+    pub fn body_limit_bytes(&self) -> usize {
+        self.body_limit
+    }
+
+    /// 自定义 Header 脱敏 / 渲染。
+    ///
+    /// 回调拿到**全量** [`HeaderMap`]（包含认证信息），返回值原样写进日志。
+    /// 设置后完全替换内置脱敏，不会在自动脱敏结果上追加。
+    #[must_use]
+    pub fn header_redactor<F>(mut self, redactor: F) -> Self
+    where
+        F: Fn(&HeaderMap) -> String + Send + Sync + 'static,
+    {
+        self.header_redactor = Some(Arc::new(redactor));
+        self
+    }
+
+    /// 渲染 Header：有手动脱敏时用回调，否则用内置 [`redact_headers`]。
+    pub fn render_headers(&self, headers: &HeaderMap) -> String {
+        match &self.header_redactor {
+            Some(redactor) => redactor(headers),
+            None => redact_headers(headers),
+        }
+    }
+}
+
+/// Debug 级别下 body 预览的默认上限（字节）。
+pub const DEFAULT_BODY_LIMIT: usize = 4 * 1024;
+
+/// 内置脱敏的敏感 Header（大小写不敏感）。
+const SENSITIVE_HEADERS: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "api-key",
+    "x-goog-api-key",
+    "cookie",
+    "set-cookie",
+];
+
+/// 把 Header 渲染成 `name: value; ...`，敏感值替换为 `<redacted>`。
+pub fn redact_headers(headers: &HeaderMap) -> String {
+    let mut rendered = String::new();
+    for (name, value) in headers {
+        if !rendered.is_empty() {
+            rendered.push_str("; ");
+        }
+        rendered.push_str(name.as_str());
+        rendered.push_str(": ");
+        if SENSITIVE_HEADERS
+            .iter()
+            .any(|sensitive| sensitive.eq_ignore_ascii_case(name.as_str()))
+        {
+            rendered.push_str("<redacted>");
+        } else {
+            rendered.push_str(value.to_str().unwrap_or("<non-utf8>"));
+        }
+    }
+    rendered
+}
+
+/// content-type 是否属于可以直接按文本展示的类型。
+pub fn is_textual_content_type(content_type: &str) -> bool {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    mime.starts_with("text/")
+        || mime.ends_with("json")
+        || mime.ends_with("+json")
+        || mime.ends_with("xml")
+        || mime.ends_with("+xml")
+        || matches!(
+            mime.as_str(),
+            "application/x-www-form-urlencoded" | "application/javascript" | "application/graphql"
+        )
+}
+
+/// 生成 body 预览。
+///
+/// - 空 body → `<empty>`；
+/// - 文本 → lossy UTF-8，`limit` 为 `Some` 时截断并标注总字节数；
+/// - 二进制 → `<binary N bytes>`；
+/// - 缺少 content-type 时用 UTF-8 有效性判断文本。
+pub fn body_preview(content_type: Option<&str>, body: &[u8], limit: Option<usize>) -> String {
+    if body.is_empty() {
+        return "<empty>".to_owned();
+    }
+
+    let textual = match content_type {
+        Some(content_type) => is_textual_content_type(content_type),
+        None => std::str::from_utf8(body).is_ok(),
+    };
+    if !textual {
+        return format!("<binary {} bytes>", body.len());
+    }
+
+    let text = String::from_utf8_lossy(body);
+    let total = text.len();
+    match limit {
+        Some(limit) if total > limit => {
+            let mut cut = limit.min(total);
+            while cut > 0 && !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            format!("{}… ({} bytes total)", &text[..cut], total)
+        }
+        _ => text.into_owned(),
     }
 }
 
@@ -357,6 +517,11 @@ impl LogHandle {
     /// [`LogLevel::Debug`] 日志。
     pub fn debug(&self, scope: Scope, message: fmt::Arguments<'_>, fields: &[Field<'_>]) {
         self.log(scope, LogLevel::Debug, message, fields);
+    }
+
+    /// [`LogLevel::Trace`] 日志。
+    pub fn trace(&self, scope: Scope, message: fmt::Arguments<'_>, fields: &[Field<'_>]) {
+        self.log(scope, LogLevel::Trace, message, fields);
     }
 }
 
@@ -706,5 +871,126 @@ mod tests {
             &[Field::error("error", &error)],
         );
         assert_eq!(collector.lines(), vec!["[protocol] failed error=boom"]);
+    }
+
+    #[test]
+    fn debug_field_renders_with_debug() {
+        let (log, collector) = handle(LogConfig::all(LogLevel::Trace));
+        let event = vec![1u8, 2];
+        log.trace(
+            Scope::STREAM,
+            format_args!("event decoded"),
+            &[Field::debug("event", &event)],
+        );
+        assert_eq!(
+            collector.lines(),
+            vec!["[stream] event decoded event=[1, 2]"]
+        );
+    }
+
+    fn sample_headers() -> HeaderMap {
+        use crate::http::{HeaderName, HeaderValue, header};
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer secret"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-api-key"),
+            HeaderValue::from_static("api-secret"),
+        );
+        headers
+    }
+
+    #[test]
+    fn redact_headers_hides_known_secrets() {
+        let rendered = redact_headers(&sample_headers());
+        assert!(rendered.contains("authorization: <redacted>"), "{rendered}");
+        assert!(rendered.contains("x-api-key: <redacted>"), "{rendered}");
+        assert!(
+            rendered.contains("content-type: application/json"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Bearer secret"), "{rendered}");
+        assert!(!rendered.contains("api-secret"), "{rendered}");
+    }
+
+    #[test]
+    fn header_redactor_replaces_builtin_redaction() {
+        use crate::http::header;
+
+        let config = LogConfig::all(LogLevel::Trace).header_redactor(|headers| {
+            format!(
+                "count={} auth={}",
+                headers.len(),
+                headers.contains_key(header::AUTHORIZATION)
+            )
+        });
+
+        // 手动回调拿到全量 Header，并完全替换内置脱敏。
+        assert_eq!(
+            config.render_headers(&sample_headers()),
+            "count=3 auth=true"
+        );
+    }
+
+    #[test]
+    fn body_limit_defaults_to_constant() {
+        assert_eq!(LogConfig::new().body_limit_bytes(), DEFAULT_BODY_LIMIT);
+        assert_eq!(LogConfig::new().body_limit(16).body_limit_bytes(), 16);
+    }
+
+    #[test]
+    fn body_preview_truncates_text() {
+        let body = br#"{"hello":"world"}"#;
+        assert_eq!(
+            body_preview(Some("application/json; charset=utf-8"), body, Some(8)),
+            "{\"hello\"… (17 bytes total)"
+        );
+        assert_eq!(
+            body_preview(Some("application/json"), body, None),
+            r#"{"hello":"world"}"#
+        );
+    }
+
+    #[test]
+    fn body_preview_keeps_char_boundary() {
+        let body = "中文".as_bytes();
+        assert_eq!(
+            body_preview(Some("text/plain"), body, Some(4)),
+            "中… (6 bytes total)"
+        );
+    }
+
+    #[test]
+    fn body_preview_summarizes_binary() {
+        let body = [0u8, 159, 146, 150];
+        assert_eq!(
+            body_preview(Some("application/octet-stream"), &body, None),
+            "<binary 4 bytes>"
+        );
+    }
+
+    #[test]
+    fn body_preview_handles_empty_and_missing_content_type() {
+        assert_eq!(body_preview(Some("application/json"), b"", None), "<empty>");
+        assert_eq!(body_preview(None, b"plain", None), "plain");
+        assert_eq!(body_preview(None, &[0xff, 0xfe], None), "<binary 2 bytes>");
+    }
+
+    #[test]
+    fn textual_content_type_detection() {
+        assert!(is_textual_content_type("text/event-stream"));
+        assert!(is_textual_content_type("application/json; charset=utf-8"));
+        assert!(is_textual_content_type("application/x-ndjson"));
+        assert!(is_textual_content_type("application/problem+json"));
+        assert!(is_textual_content_type("application/x-www-form-urlencoded"));
+        assert!(!is_textual_content_type("application/octet-stream"));
+        assert!(!is_textual_content_type("multipart/form-data; boundary=x"));
     }
 }

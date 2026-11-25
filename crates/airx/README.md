@@ -92,7 +92,12 @@ let client = Client::builder()
 - 级别：`Error` / `Warn` / `Info` / `Debug` / `Trace`；配置某级别输出该级别及更严重的级别。
 - scope：`net` / `call` / `stream` / `retry` / `protocol`，也可 `Scope::new("custom")`。
 - 默认完全静默：只传 `logger` 不传 `log_config` 不会产生输出。
-- 不记录请求体、响应体、认证 Header；URI 只记录 path（不含 query）。
+- `Info` 及以下不记录 Header 与 body；`net=Debug` 输出 headers（自动脱敏）与截断 body
+  （`LogConfig::body_limit`，默认 4096 字节），`net=Trace` 额外补一条完整 body；SSE 逐帧用
+  `stream=Trace`。
+- Header 默认自动脱敏；`LogConfig::header_redactor(|headers| ...)` 完全替换自动脱敏，
+  回调拿到全量 `HeaderMap`。body 不做自动脱敏。
+- URI 只记录 path（不含 query）。
 - `tracing` feature 提供 `TracingLogger` 适配器，scope 映射为 `airx::net` / `airx::call` 等 target。
 
 ## Feature

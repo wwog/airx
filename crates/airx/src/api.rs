@@ -258,6 +258,7 @@ impl<P: StreamingEndpoint + Clone> ApiClient<P> {
 
         let body = collect_body(body).await?;
         let synthetic = HttpResponse::new(status, headers, body);
+        self.executor.log_response_details(&synthetic);
         match self.endpoint.decode(synthetic) {
             Ok(_) => {
                 let error = AirxError::Configuration(airx_core::error::ConfigurationError::new(

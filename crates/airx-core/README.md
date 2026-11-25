@@ -67,6 +67,13 @@ assert!(!log.enabled(Scope::RETRY, LogLevel::Warn));
 
 配置某级别表示输出该级别及更严重的级别；未配置的 scope 默认 `Off`。
 
+辅助设施（纯函数，供上层日志点复用）：
+
+- `Field::debug(key, value)`：以 `Debug` 形态记录没有 `Display` 的结构（如流式事件）。
+- `redact_headers(&HeaderMap)`：内置 Header 脱敏；`LogConfig::header_redactor` 可完全替换。
+- `body_preview(content_type, body, limit)`：文本截断预览 / 二进制摘要。
+- `LogConfig::body_limit(usize)`：`Debug` 级别 body 预览上限，默认 4 KiB。
+
 ## License
 
 MIT OR Apache-2.0

@@ -11,8 +11,8 @@ use std::task::{Context, Poll};
 
 use airx_core::AirxError;
 use airx_core::error::StreamError;
-use airx_core::log::{LogHandle, LogLevel, Scope, Timer};
-use airx_core::stream::{SseDecoder, StreamStatus};
+use airx_core::log::{Field, LogHandle, LogLevel, Scope, Timer};
+use airx_core::stream::{RawEvent, SseDecoder, StreamStatus};
 use airx_protocol::StreamingEndpoint;
 use airx_transport::ByteStream;
 use futures_core::Stream;
@@ -30,6 +30,7 @@ pub struct ProtocolStream<P: StreamingEndpoint> {
     meta: StreamMeta,
     log: LogHandle,
     timer: Timer,
+    frames: u64,
     events: u64,
     ended: bool,
 }
@@ -39,6 +40,7 @@ impl<P: StreamingEndpoint> std::fmt::Debug for ProtocolStream<P> {
         f.debug_struct("ProtocolStream")
             .field("finished", &self.finished)
             .field("meta", &self.meta)
+            .field("frames", &self.frames)
             .field("events", &self.events)
             .finish_non_exhaustive()
     }
@@ -54,6 +56,7 @@ impl<P: StreamingEndpoint> ProtocolStream<P> {
             meta,
             log,
             timer: Timer::start(),
+            frames: 0,
             events: 0,
             ended: false,
         }
@@ -72,6 +75,30 @@ impl<P: StreamingEndpoint> ProtocolStream<P> {
     /// request id（若有）。
     pub fn request_id(&self) -> Option<&str> {
         self.meta.request_id.as_deref()
+    }
+
+    /// `Trace` 记录一条 SSE 原始帧。
+    fn log_frame(&self, index: u64, frame: &RawEvent) {
+        if !self.log.enabled(Scope::STREAM, LogLevel::Trace) {
+            return;
+        }
+        self.log.trace(
+            Scope::STREAM,
+            format_args!("sse frame"),
+            &[Field::new("index", &index), Field::debug("frame", frame)],
+        );
+    }
+
+    /// `Trace` 记录一条解析后的协议事件。
+    fn log_event(&self, index: u64, event: &P::Event) {
+        if !self.log.enabled(Scope::STREAM, LogLevel::Trace) {
+            return;
+        }
+        self.log.trace(
+            Scope::STREAM,
+            format_args!("event decoded"),
+            &[Field::new("index", &index), Field::debug("event", event)],
+        );
     }
 
     /// 记录一次流结束；只记录第一次。
@@ -160,17 +187,22 @@ impl<P: StreamingEndpoint + Unpin> Stream for ProtocolStream<P> {
             }
 
             match this.sse.next_event() {
-                Ok(Some(raw)) => match this.endpoint.decode_event(raw) {
-                    Ok(Some(event)) => {
-                        this.events += 1;
-                        return Poll::Ready(Some(Ok(event)));
+                Ok(Some(raw)) => {
+                    this.frames += 1;
+                    this.log_frame(this.frames, &raw);
+                    match this.endpoint.decode_event(raw) {
+                        Ok(Some(event)) => {
+                            this.events += 1;
+                            this.log_event(this.events, &event);
+                            return Poll::Ready(Some(Ok(event)));
+                        }
+                        Ok(None) => continue,
+                        Err(error) => {
+                            this.log_end(Some(&error));
+                            return Poll::Ready(Some(Err(error)));
+                        }
                     }
-                    Ok(None) => continue,
-                    Err(error) => {
-                        this.log_end(Some(&error));
-                        return Poll::Ready(Some(Err(error)));
-                    }
-                },
+                }
                 Ok(None) => {}
                 Err(error) => {
                     let error = AirxError::Stream(error);
@@ -189,17 +221,22 @@ impl<P: StreamingEndpoint + Unpin> Stream for ProtocolStream<P> {
                 Poll::Ready(None) => {
                     this.finished = true;
                     let flushed = match this.sse.finish() {
-                        Ok(Some(raw)) => match this.endpoint.decode_event(raw) {
-                            Ok(Some(event)) => {
-                                this.events += 1;
-                                Some(event)
+                        Ok(Some(raw)) => {
+                            this.frames += 1;
+                            this.log_frame(this.frames, &raw);
+                            match this.endpoint.decode_event(raw) {
+                                Ok(Some(event)) => {
+                                    this.events += 1;
+                                    this.log_event(this.events, &event);
+                                    Some(event)
+                                }
+                                Ok(None) => None,
+                                Err(error) => {
+                                    this.log_end(Some(&error));
+                                    return Poll::Ready(Some(Err(error)));
+                                }
                             }
-                            Ok(None) => None,
-                            Err(error) => {
-                                this.log_end(Some(&error));
-                                return Poll::Ready(Some(Err(error)));
-                            }
-                        },
+                        }
                         Ok(None) => None,
                         Err(error) => {
                             let error = AirxError::Stream(error);

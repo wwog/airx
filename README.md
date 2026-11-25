@@ -214,17 +214,23 @@ let client = Client::builder()
 
 | scope | 关键事件 |
 | --- | --- |
-| `net` | 发送请求、收到响应、非 2xx、传输失败 |
+| `net` | 发送请求、收到响应、非 2xx、传输失败；`Debug` / `Trace` 追加 headers（脱敏）与 body |
 | `call` | 调用完成（状态码 / request id / 耗时）、调用失败 |
-| `stream` | 流建立、流结束、流失败或截断 |
+| `stream` | 流建立、流结束、流失败或截断；`Trace` 追加 SSE 原始帧与解析事件 |
 | `retry` | 准备重试、重试成功、重试耗尽 |
 | `protocol` | 请求编码 / 响应解码失败 |
 
 - 级别：`Error` < `Warn` < `Info` < `Debug` < `Trace`；配置某级别输出该级别及更严重级别。
 - 未传 `logger` 或未传 `log_config` 都不产生输出。
-- 不记录请求体、响应体、认证 Header；URI 只记录 path（不含 query）。
+- `Info` 及以下不记录 Header 与 body；`net=Debug` 输出 headers（自动脱敏）和截断 body
+  （`LogConfig::body_limit`，默认 4096 字节），`net=Trace` 额外补一条完整 body。
+- Header 默认自动脱敏；`LogConfig::header_redactor(|headers| ...)` 可完全替换自动脱敏，
+  回调拿到全量 `HeaderMap`。body 不做自动脱敏，`Trace` 输出完整内容时请自行确认环境安全。
+- URI 只记录 path（不含 query）。
 - `tracing` feature 提供 `TracingLogger`：scope 映射为 `airx::net` / `airx::call` 等 target，
-  可用 `RUST_LOG=airx::net=info,airx::call=info` 二次过滤。
+  可用 `RUST_LOG=airx::net=info,airx::call=info` 二次过滤；请求 / 响应详情用
+  `RUST_LOG=airx::net=debug`（截断）或 `airx::net=trace`（完整），SSE 逐帧用
+  `RUST_LOG=airx::stream=trace`。
 
 ## Feature
 

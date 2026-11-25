@@ -542,7 +542,7 @@ stream = []
 | --- | --- |
 | `LogLevel` | `Off` / `Error` / `Warn` / `Info` / `Debug` / `Trace`；配置某级别表示输出该级别及更严重级别 |
 | `Scope` | 日志作用域；内置 `NET` / `CALL` / `STREAM` / `RETRY` / `PROTOCOL`，支持 `Scope::new("custom")` |
-| `LogConfig` | scope → 级别映射；精确匹配优先，未匹配回退 `default_level`（默认 `Off`） |
+| `LogConfig` | scope → 级别映射、body 预览上限与可选 Header 脱敏回调；精确匹配优先，未匹配回退 `default_level`（默认 `Off`） |
 | `Logger` | 业务层实现，`fn log(&self, &Record<'_>)`，同步、无返回值 |
 | `LogHandle` | `Arc<dyn Logger>` + `LogConfig`；`enabled()` 先过滤，关闭时不构造字段 |
 
@@ -551,6 +551,10 @@ stream = []
 - 不传 `logger` → `LogHandle::disabled()`，全部日志点短路。
 - 传了 `logger` 但没传 `log_config` → 配置仍是 `Off`，依然静默。
 - 必须显式按 scope 开启，例如 `{net: Info, call: Info}`。
+- 只有 `Debug` / `Trace` 才输出 Header 与 body：`net=Debug` 输出一条摘要
+  （body 截断到 `LogConfig::body_limit`，默认 4096 字节），`net=Trace` 额外补一条完整 body。
+- Header 默认自动脱敏（`authorization` / `x-api-key` / `x-goog-api-key` / `cookie` 等）；
+  `LogConfig::header_redactor` 可完全接管渲染，回调拿到**全量** `HeaderMap`。
 
 ```rust
 let config = LogConfig::new()
@@ -570,18 +574,25 @@ let client = Client::builder()
 | scope | 级别 | 事件 |
 | --- | --- | --- |
 | `net` | Info / Warn / Error | 发送请求、收到响应、非 2xx、传输失败 |
+| `net` | Debug / Trace | 请求 / 响应详情：headers（已脱敏）、content-type、body；Trace 额外补一条完整 body |
 | `call` | Info / Error | 调用完成（状态码、request id、耗时）、调用失败 |
 | `stream` | Info / Error | 流建立、流正常结束、流失败 / 截断 |
+| `stream` | Trace | SSE 原始帧（`RawEvent`）与解析后的协议事件逐条 |
 | `retry` | Warn / Info / Error | 准备重试、重试后成功、重试耗尽 |
 | `protocol` | Error | 请求编码失败、响应 / 事件解码失败 |
 
-安全约定：不记录请求体、响应体、认证 Header；URI 只记录 `path`（不含 query），
-避免网关把密钥放在 query 中时被写进日志。错误以 `Display` 形式记录，不 dump 结构。
+安全约定：`Info` 及以下不记录 Header 与 body，只有显式把 `net` 开到 `Debug` / `Trace`
+才输出。Header 默认自动脱敏；设置 `LogConfig::header_redactor` 后**完全替换**自动脱敏
+（不会在其结果上追加），回调可以拿到全量 Header。body 不做自动脱敏：`Debug` 摘要里的
+body 截断到 `body_limit`（默认 4 KiB），`Trace` 额外输出完整 body，仅建议在本地排查时开启。
+URI 始终只记录 `path`（不含 query），避免网关把密钥放在 query 中时被写进日志。错误以
+`Display` 形式记录，不 dump 结构。
 
 `airx` 的 `tracing` feature 提供 `TracingLogger` 适配器，把内置 scope 映射为固定 target
 （`airx::net`、`airx::call`、`airx::stream`、`airx::retry`、`airx::protocol`，其它 scope
-归到 `airx`），因此可以用 `RUST_LOG=airx::net=info,airx::call=info` 二次过滤。
-级别过滤仍由 `LogConfig` 完成，tracing 只是输出通道。
+归到 `airx`），因此可以用 `RUST_LOG=airx::net=info,airx::call=info` 过滤；需要请求 /
+响应详情时用 `RUST_LOG=airx::net=debug`（截断 body）或 `airx::net=trace`（完整 body），
+SSE 逐帧日志用 `airx::stream=trace`。级别过滤仍由 `LogConfig` 完成，tracing 只是输出通道。
 
 ```toml
 airx = { version = "0.1", features = ["tracing"] }
@@ -603,9 +614,9 @@ airx = { version = "0.1", features = ["tracing"] }
 | 路径覆盖 | `airx/tests/endpoint_paths.rs` | base_url 与模式路径的构建时 / 运行时覆盖 |
 | SDK 体验 | `airx/tests/sdk_experience.rs`、`models_and_tokens.rs` | 请求选项、响应元数据、`Stream`、parse、默认重试、models / countTokens |
 | 资源与底层接入 | `airx/tests/resources.rs` | Files / Batches / Embeddings、Responses 生命周期、multipart、per-request timeout/retry、raw execute |
-| 日志 | `airx/tests/logging.rs`、`airx-core/src/log.rs` 单测 | scope 独立开关、默认静默、级别过滤、retry / stream / protocol 日志点、凭据与 body 不落日志 |
+| 日志 | `airx/tests/logging.rs`、`airx-core/src/log.rs` 单测 | scope 独立开关、默认静默、级别过滤、Header 自动 / 手动脱敏、body 截断与完整输出、SSE 逐帧、Info 日志不泄露凭据 |
 
-当前 `cargo test --workspace` 共 **503** 个用例（含 doc-test），全绿。
+当前 `cargo test --workspace` 共 **517** 个用例（含 doc-test），全绿。
 
 关键断言：
 
@@ -615,7 +626,8 @@ airx = { version = "0.1", features = ["tracing"] }
 - 截断流不会被当作成功。
 - 执行级 Header 不覆盖协议 Header；单次请求选项可覆盖。
 - native 默认重试按幂等性与 429 规则执行；显式禁用后只发一次。
-- 只开 `{net, call}` 时 `stream` / `retry` / `protocol` 不出日志；日志中不出现 API Key、query 与请求体。
+- 只开 `{net, call}` 时 `stream` / `retry` / `protocol` 不出日志；Info 及以下日志不出现 API Key、query 与请求体。
+- `net=Debug` / `Trace` 下 Header 自动脱敏，手动 `header_redactor` 完全替换内置脱敏；Debug body 截断、Trace 完整。
 
 ### 9.2 CI
 

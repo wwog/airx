@@ -3,7 +3,7 @@
 //! 覆盖三类关注点：
 //! 1. `{net: Info, call: Info}` 能收到请求与调用日志，其他 scope 保持静默；
 //! 2. 关闭状态完全静默，行为与不传 logger 一致；
-//! 3. 日志不泄露认证 Header、请求体与 query。
+//! 3. Info 及以下不泄露认证 Header、请求体与 query；Debug/Trace 才显式输出详情。
 
 #![cfg(feature = "openai")]
 
@@ -240,7 +240,7 @@ async fn transport_failure_is_logged_as_error() {
 async fn logs_never_contain_credentials_body_or_query() {
     let mock = MockTransport::new();
     mock.push_json(200, SUCCESS);
-    let config = LogConfig::all(LogLevel::Trace);
+    let config = LogConfig::all(LogLevel::Info);
     let collector = Arc::new(Collector::default());
     let client = Client::builder()
         .transport(mock.clone())
@@ -258,12 +258,100 @@ async fn logs_never_contain_credentials_body_or_query() {
     chat.create(request()).await.expect("response");
 
     let joined = collector.lines().join("\n");
+    assert!(!joined.contains("request details"), "{joined}");
     assert!(!joined.contains("sk-secret-value"), "{joined}");
     assert!(!joined.contains("query-secret"), "{joined}");
     assert!(!joined.contains("api_key="), "{joined}");
     assert!(!joined.contains("hello"), "请求体不应进入日志: {joined}");
     // 只记录 path，不记录完整 URI。
     assert!(joined.contains("/v1/chat/completions"), "{joined}");
+}
+
+#[tokio::test]
+async fn net_debug_logs_redacted_headers_and_truncated_body() {
+    let mock = MockTransport::new();
+    mock.push_json(200, SUCCESS);
+    let config = LogConfig::new()
+        .scope(Scope::NET, LogLevel::Debug)
+        .body_limit(256);
+    let (client, collector) = client_with(&mock, config);
+
+    client.chat().create(request()).await.expect("response");
+
+    let joined = collector.lines().join("\n");
+    assert!(joined.contains("[net] request details"), "{joined}");
+    assert!(joined.contains("[net] response details"), "{joined}");
+    assert!(joined.contains("authorization: <redacted>"), "{joined}");
+    assert!(!joined.contains("sk-secret-value"), "{joined}");
+    // 请求体在 256 字节内完整可见；响应体超过上限被截断。
+    assert!(joined.contains("hello"), "{joined}");
+    assert!(joined.contains("… ("), "{joined}");
+}
+
+#[tokio::test]
+async fn net_trace_logs_full_body() {
+    let mock = MockTransport::new();
+    mock.push_json(200, SUCCESS);
+    let config = LogConfig::new().scope(Scope::NET, LogLevel::Trace);
+    let (client, collector) = client_with(&mock, config);
+
+    client.chat().create(request()).await.expect("response");
+
+    let joined = collector.lines().join("\n");
+    assert!(joined.contains("[net] request details"), "{joined}");
+    assert!(joined.contains("[net] response details"), "{joined}");
+    // Trace 额外补一条完整 body。
+    assert!(joined.contains("[net] request body"), "{joined}");
+    assert!(joined.contains("[net] response body"), "{joined}");
+    assert!(collector.levels().contains(&LogLevel::Trace), "{joined}");
+    // Trace 不截断：请求体与完整响应体都在。
+    assert!(joined.contains("hello"), "{joined}");
+    assert!(joined.contains(r#""total_tokens": 7"#), "{joined}");
+    assert!(!joined.contains("… ("), "{joined}");
+    assert!(joined.contains("authorization: <redacted>"), "{joined}");
+    assert!(!joined.contains("sk-secret-value"), "{joined}");
+}
+
+#[tokio::test]
+async fn manual_header_redactor_replaces_builtin_redaction() {
+    let mock = MockTransport::new();
+    mock.push_json(200, SUCCESS);
+    let config = LogConfig::new()
+        .scope(Scope::NET, LogLevel::Debug)
+        .header_redactor(|headers| {
+            format!(
+                "count={} has_auth={}",
+                headers.len(),
+                headers.contains_key(airx::http::header::AUTHORIZATION)
+            )
+        });
+    let (client, collector) = client_with(&mock, config);
+
+    client.chat().create(request()).await.expect("response");
+
+    let joined = collector.lines().join("\n");
+    // 手动回调拿到全量 Header，并且完全替换自动脱敏。
+    assert!(joined.contains("has_auth=true"), "{joined}");
+    assert!(!joined.contains("<redacted>"), "{joined}");
+    assert!(!joined.contains("sk-secret-value"), "{joined}");
+}
+
+#[tokio::test]
+async fn binary_response_body_is_summarized() {
+    let mock = MockTransport::new();
+    let mut headers = airx_core::http::HeaderMap::new();
+    headers.insert(
+        airx::http::header::CONTENT_TYPE,
+        airx_core::http::HeaderValue::from_static("application/octet-stream"),
+    );
+    mock.push_response(200, headers, Bytes::from_static(b"\x00\x9f\x92\x96"));
+    let config = LogConfig::new().scope(Scope::NET, LogLevel::Trace);
+    let (client, collector) = client_with(&mock, config);
+
+    assert!(client.chat().create(request()).await.is_err());
+
+    let joined = collector.lines().join("\n");
+    assert!(joined.contains("<binary 4 bytes>"), "{joined}");
 }
 
 #[cfg(feature = "stream")]
@@ -365,4 +453,34 @@ async fn protocol_decode_failure_is_logged() {
         "{lines:?}"
     );
     assert!(lines[0].contains("phase=decode"), "{lines:?}");
+}
+
+#[cfg(feature = "stream")]
+#[tokio::test]
+async fn stream_trace_logs_raw_frames_and_decoded_events() {
+    let mock = MockTransport::new();
+    let sse = concat!(
+        r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"hi"}}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+    mock.push_stream(
+        200,
+        airx_core::http::HeaderMap::new(),
+        vec![Bytes::from_static(sse.as_bytes())],
+    );
+
+    let config = LogConfig::new().scope(Scope::STREAM, LogLevel::Trace);
+    let (client, collector) = client_with(&mock, config);
+
+    let mut stream = client.chat().stream(request()).await.expect("stream");
+    while stream.next().await.expect("event").is_some() {}
+
+    let joined = collector.lines().join("\n");
+    assert!(joined.contains("[stream] sse frame"), "{joined}");
+    assert!(joined.contains("[stream] event decoded"), "{joined}");
+    assert!(joined.contains("index=1"), "{joined}");
+    assert!(joined.contains("event=Done"), "{joined}");
+    assert!(joined.contains("frame=RawEvent"), "{joined}");
+    assert!(joined.contains("[stream] stream ended"), "{joined}");
 }

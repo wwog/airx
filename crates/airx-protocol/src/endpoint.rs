@@ -26,7 +26,9 @@ pub trait Endpoint {
 /// 支持流式的协议端点。
 pub trait StreamingEndpoint: Endpoint {
     /// 原生事件类型。
-    type Event;
+    ///
+    /// 要求 `Debug`：`ProtocolStream` 在 `Trace` 级别会逐事件记录解析结果。
+    type Event: std::fmt::Debug;
 
     /// 解码单个原始 SSE 事件。
     ///
