@@ -19,7 +19,7 @@ gemini = []
 stream = []
 
 [dependencies]
-airx-core = { version = "0.1.1", path = "../airx-core", default-features = false }
+airx-core = { version = "0.1.2", path = "../airx-core", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 bytes.workspace = true

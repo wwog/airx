@@ -35,9 +35,9 @@ stream = ["airx-core/stream", "airx-protocol/stream", "airx-transport/stream"]
 tracing = ["airx-core/tracing"]
 
 [dependencies]
-airx-core = { version = "0.1.1", path = "../airx-core", default-features = false }
-airx-protocol = { version = "0.1.1", path = "../airx-protocol", default-features = false }
-airx-transport = { version = "0.1.1", path = "../airx-transport", default-features = false }
+airx-core = { version = "0.1.2", path = "../airx-core", default-features = false }
+airx-protocol = { version = "0.1.2", path = "../airx-protocol", default-features = false }
+airx-transport = { version = "0.1.2", path = "../airx-transport", default-features = false }
 futures-core.workspace = true
 futures-util.workspace = true
 serde.workspace = true

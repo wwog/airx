@@ -30,7 +30,7 @@ wasm = [
 stream = []
 
 [dependencies]
-airx-core = { version = "0.1.1", path = "../airx-core", default-features = false }
+airx-core = { version = "0.1.2", path = "../airx-core", default-features = false }
 bytes.workspace = true
 http.workspace = true
 futures-core.workspace = true
