@@ -92,7 +92,7 @@ Client::openai()                 // 命名空间 + 执行配置起点
   .build()                       // 校验配置、创建 Executor、返回 OpenAi
 ```
 
-`Client` 只是入口命名空间；`ClientBuilder` 保存执行级配置（Transport、超时、重试、默认 Header），
+`Client` 只是入口命名空间；`ClientBuilder` 保存执行级配置（Transport、超时、重试、默认 Header、日志），
 各 Provider 构建器保存协议级配置（API Key、base URL、模式路径、API 版本等）。
 `build()` 把执行配置固化为共享的 `Arc<Executor>`，并返回**已定性的 Provider 客户端**：
 
@@ -405,7 +405,7 @@ SSE 层只认语法，不认 `[DONE]` 等协议约定。
 
 | 层 | 持有者 | 内容 |
 | --- | --- | --- |
-| 执行级 | `ClientBuilder` → `Executor` | Transport、连接 / 整体超时、`RetryPolicy`、执行级默认 Header |
+| 执行级 | `ClientBuilder` → `Executor` | Transport、连接 / 整体超时、`RetryPolicy`、执行级默认 Header、`Logger` + `LogConfig` |
 | 单次请求 | `RequestOptions` | 临时 Header、`Idempotency-Key`、timeout、retry override |
 | Provider 级 | `OpenAiConfig` / `AnthropicConfig` / `GeminiConfig` | API Key、base URL、模式路径、API 版本、组织 / 项目、Provider 默认 Header |
 
@@ -532,6 +532,63 @@ stream = []
 - Native 的 `Send + Sync` 约束在 WASM 下放宽，以适配浏览器 Future / Stream。
 - WASM 传输已通过 `wasm32-unknown-unknown` 编译检查；浏览器运行时行为未纳入 CI。
 
+### 8.5 日志
+
+日志是**按客户端注入**的分级设施，不是全局 subscriber：多个客户端可以用不同 `Logger`
+与不同过滤配置，互不影响。类型位于 `airx-core::log`，门面通过 `airx::log` 与
+`prelude` 重导出。
+
+| 类型 | 职责 |
+| --- | --- |
+| `LogLevel` | `Off` / `Error` / `Warn` / `Info` / `Debug` / `Trace`；配置某级别表示输出该级别及更严重级别 |
+| `Scope` | 日志作用域；内置 `NET` / `CALL` / `STREAM` / `RETRY` / `PROTOCOL`，支持 `Scope::new("custom")` |
+| `LogConfig` | scope → 级别映射；精确匹配优先，未匹配回退 `default_level`（默认 `Off`） |
+| `Logger` | 业务层实现，`fn log(&self, &Record<'_>)`，同步、无返回值 |
+| `LogHandle` | `Arc<dyn Logger>` + `LogConfig`；`enabled()` 先过滤，关闭时不构造字段 |
+
+默认行为：
+
+- 不传 `logger` → `LogHandle::disabled()`，全部日志点短路。
+- 传了 `logger` 但没传 `log_config` → 配置仍是 `Off`，依然静默。
+- 必须显式按 scope 开启，例如 `{net: Info, call: Info}`。
+
+```rust
+let config = LogConfig::new()
+    .scope(Scope::NET, LogLevel::Info)
+    .scope(Scope::CALL, LogLevel::Info);
+
+let client = Client::builder()
+    .logger(Arc::new(MyLogger))     // 业务层 sink
+    .log_config(config)
+    .openai()
+    .api_key("sk-...")
+    .build()?;
+```
+
+日志点：
+
+| scope | 级别 | 事件 |
+| --- | --- | --- |
+| `net` | Info / Warn / Error | 发送请求、收到响应、非 2xx、传输失败 |
+| `call` | Info / Error | 调用完成（状态码、request id、耗时）、调用失败 |
+| `stream` | Info / Error | 流建立、流正常结束、流失败 / 截断 |
+| `retry` | Warn / Info / Error | 准备重试、重试后成功、重试耗尽 |
+| `protocol` | Error | 请求编码失败、响应 / 事件解码失败 |
+
+安全约定：不记录请求体、响应体、认证 Header；URI 只记录 `path`（不含 query），
+避免网关把密钥放在 query 中时被写进日志。错误以 `Display` 形式记录，不 dump 结构。
+
+`airx` 的 `tracing` feature 提供 `TracingLogger` 适配器，把内置 scope 映射为固定 target
+（`airx::net`、`airx::call`、`airx::stream`、`airx::retry`、`airx::protocol`，其它 scope
+归到 `airx`），因此可以用 `RUST_LOG=airx::net=info,airx::call=info` 二次过滤。
+级别过滤仍由 `LogConfig` 完成，tracing 只是输出通道。
+
+```toml
+airx = { version = "0.1", features = ["tracing"] }
+```
+
+内置 native / wasm 传输与重试不再直接调用 `tracing` 宏，避免同一次请求出现两份日志。
+
 ---
 
 ## 9. 测试与质量保障
@@ -546,8 +603,9 @@ stream = []
 | 路径覆盖 | `airx/tests/endpoint_paths.rs` | base_url 与模式路径的构建时 / 运行时覆盖 |
 | SDK 体验 | `airx/tests/sdk_experience.rs`、`models_and_tokens.rs` | 请求选项、响应元数据、`Stream`、parse、默认重试、models / countTokens |
 | 资源与底层接入 | `airx/tests/resources.rs` | Files / Batches / Embeddings、Responses 生命周期、multipart、per-request timeout/retry、raw execute |
+| 日志 | `airx/tests/logging.rs`、`airx-core/src/log.rs` 单测 | scope 独立开关、默认静默、级别过滤、retry / stream / protocol 日志点、凭据与 body 不落日志 |
 
-当前共 **283** 个测试，`cargo test --workspace` 全绿。
+当前 `cargo test --workspace` 共 **503** 个用例（含 doc-test），全绿。
 
 关键断言：
 
@@ -557,6 +615,7 @@ stream = []
 - 截断流不会被当作成功。
 - 执行级 Header 不覆盖协议 Header；单次请求选项可覆盖。
 - native 默认重试按幂等性与 429 规则执行；显式禁用后只发一次。
+- 只开 `{net, call}` 时 `stream` / `retry` / `protocol` 不出日志；日志中不出现 API Key、query 与请求体。
 
 ### 9.2 CI
 
@@ -609,6 +668,7 @@ crates/
 │   │   ├── format.rs         # JsonMode / to_string
 │   │   ├── raw.rs            # RawJson / RawExtension / parse_raw
 │   │   └── value.rs          # Extensions（BTreeMap<String, Value>）
+│   ├── log.rs                # LogLevel / Scope / LogConfig / Logger / LogHandle / airx_log!
 │   └── stream/
 │       ├── buffer.rs         # 字节 → 行（LF / CRLF / CR、BOM、UTF-8）
 │       ├── decoder.rs        # 行 → RawEvent

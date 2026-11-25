@@ -7,12 +7,13 @@
 use std::sync::Arc;
 
 use airx_core::AirxError;
-use airx_core::http::{HeaderValue, HttpRequest, HttpResponse, header};
+use airx_core::http::{HeaderValue, HttpRequest, HttpResponse, Method, StatusCode, header};
+use airx_core::log::{LogLevel, Scope, Timer};
 use airx_protocol::Endpoint;
 #[cfg(feature = "stream")]
 use airx_protocol::StreamingEndpoint;
 
-use crate::executor::Executor;
+use crate::executor::{Executor, path_of};
 use crate::options::RequestOptions;
 #[cfg(feature = "stream")]
 use crate::response::StreamMeta;
@@ -70,10 +71,31 @@ impl<P: Endpoint> ApiClient<P> {
         request: &P::Request,
         options: &RequestOptions,
     ) -> Result<P::Response, AirxError> {
-        let mut http_request = self.endpoint.encode(request)?;
+        let mut http_request = self.encode(request)?;
         accept(&mut http_request, "application/json");
-        let response = self.executor.execute_with(http_request, options).await?;
-        self.endpoint.decode(response)
+        let context = CallContext::new(&http_request);
+
+        let response = match self.executor.execute_with(http_request, options).await {
+            Ok(response) => response,
+            Err(error) => {
+                self.log_call_failure(&context, &error);
+                return Err(error);
+            }
+        };
+
+        let status = response.status;
+        let request_id = airx_transport::extract_request_id(&response.headers);
+        match self.endpoint.decode(response) {
+            Ok(data) => {
+                self.log_call_success(&context, status, request_id.as_deref());
+                Ok(data)
+            }
+            Err(error) => {
+                self.log_protocol("decode", &error);
+                self.log_call_failure(&context, &error);
+                Err(error)
+            }
+        }
     }
 
     /// 与 [`ApiClient::create_with`] 相同，同时返回 HTTP 元数据。
@@ -82,12 +104,100 @@ impl<P: Endpoint> ApiClient<P> {
         request: &P::Request,
         options: &RequestOptions,
     ) -> Result<WithMeta<P::Response>, AirxError> {
-        let mut http_request = self.endpoint.encode(request)?;
+        let mut http_request = self.encode(request)?;
         accept(&mut http_request, "application/json");
-        let response = self.executor.execute_with(http_request, options).await?;
+        let context = CallContext::new(&http_request);
+
+        let response = match self.executor.execute_with(http_request, options).await {
+            Ok(response) => response,
+            Err(error) => {
+                self.log_call_failure(&context, &error);
+                return Err(error);
+            }
+        };
+
+        let status = response.status;
         let meta = ResponseMeta::from_response(&response);
-        let data = self.endpoint.decode(response)?;
-        Ok(WithMeta { data, meta })
+        match self.endpoint.decode(response) {
+            Ok(data) => {
+                self.log_call_success(&context, status, meta.request_id.as_deref());
+                Ok(WithMeta { data, meta })
+            }
+            Err(error) => {
+                self.log_protocol("decode", &error);
+                self.log_call_failure(&context, &error);
+                Err(error)
+            }
+        }
+    }
+
+    /// 编码请求；失败时记录 `protocol` 日志。
+    fn encode(&self, request: &P::Request) -> Result<HttpRequest, AirxError> {
+        self.endpoint.encode(request).inspect_err(|error| {
+            self.log_protocol("encode", error);
+        })
+    }
+
+    fn log_protocol(&self, phase: &'static str, error: &AirxError) {
+        airx_core::airx_log!(
+            self.executor.log(),
+            Scope::PROTOCOL,
+            LogLevel::Error,
+            "protocol encode/decode failed",
+            phase = phase,
+            error = error,
+        );
+    }
+
+    fn log_call_success(
+        &self,
+        context: &CallContext,
+        status: StatusCode,
+        request_id: Option<&str>,
+    ) {
+        airx_core::airx_log!(
+            self.executor.log(),
+            Scope::CALL,
+            LogLevel::Info,
+            "call completed",
+            method = context.method,
+            path = context.path,
+            status = status.as_u16(),
+            request_id = request_id.unwrap_or("-"),
+            stream = false,
+            elapsed = context.timer.elapsed(),
+        );
+    }
+
+    fn log_call_failure(&self, context: &CallContext, error: &AirxError) {
+        airx_core::airx_log!(
+            self.executor.log(),
+            Scope::CALL,
+            LogLevel::Error,
+            "call failed",
+            method = context.method,
+            path = context.path,
+            stream = false,
+            error = error,
+            elapsed = context.timer.elapsed(),
+        );
+    }
+}
+
+/// 一次逻辑调用的日志上下文。
+struct CallContext {
+    method: Method,
+    path: String,
+    timer: Timer,
+}
+
+impl CallContext {
+    fn new(request: &HttpRequest) -> Self {
+        Self {
+            method: request.method.clone(),
+            path: path_of(request),
+            timer: Timer::start(),
+        }
     }
 }
 
@@ -106,12 +216,21 @@ impl<P: StreamingEndpoint + Clone> ApiClient<P> {
         request: &P::Request,
         options: &RequestOptions,
     ) -> Result<ProtocolStream<P>, AirxError> {
-        let mut http_request = self.endpoint.encode(request)?;
+        let mut http_request = self.encode(request)?;
         accept(&mut http_request, "text/event-stream");
-        let response = self
+        let context = CallContext::new(&http_request);
+
+        let response = match self
             .executor
             .execute_stream_with(http_request, options)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                self.log_stream_call_failure(&context, &error);
+                return Err(error);
+            }
+        };
 
         let meta = StreamMeta::from_response(&response);
         let status = response.status;
@@ -119,19 +238,53 @@ impl<P: StreamingEndpoint + Clone> ApiClient<P> {
         let body = response.body;
 
         if status.is_success() {
-            return Ok(ProtocolStream::new(self.endpoint.clone(), body, meta));
+            airx_core::airx_log!(
+                self.executor.log(),
+                Scope::STREAM,
+                LogLevel::Info,
+                "stream opened",
+                method = context.method,
+                path = context.path,
+                status = status.as_u16(),
+                request_id = meta.request_id.as_deref().unwrap_or("-"),
+            );
+            return Ok(ProtocolStream::new(
+                self.endpoint.clone(),
+                body,
+                meta,
+                self.executor.log().clone(),
+            ));
         }
 
         let body = collect_body(body).await?;
         let synthetic = HttpResponse::new(status, headers, body);
         match self.endpoint.decode(synthetic) {
-            Ok(_) => Err(AirxError::Configuration(
-                airx_core::error::ConfigurationError::new(
+            Ok(_) => {
+                let error = AirxError::Configuration(airx_core::error::ConfigurationError::new(
                     "非 2xx 流式响应被协议层意外解析为成功响应",
-                ),
-            )),
-            Err(error) => Err(error),
+                ));
+                self.log_stream_call_failure(&context, &error);
+                Err(error)
+            }
+            Err(error) => {
+                self.log_stream_call_failure(&context, &error);
+                Err(error)
+            }
         }
+    }
+
+    fn log_stream_call_failure(&self, context: &CallContext, error: &AirxError) {
+        airx_core::airx_log!(
+            self.executor.log(),
+            Scope::CALL,
+            LogLevel::Error,
+            "call failed",
+            method = context.method,
+            path = context.path,
+            stream = true,
+            error = error,
+            elapsed = context.timer.elapsed(),
+        );
     }
 }
 

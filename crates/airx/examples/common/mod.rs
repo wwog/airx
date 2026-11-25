@@ -9,8 +9,8 @@
 
 use std::time::Duration;
 
+use airx::http::{HeaderMap, HeaderName, HeaderValue};
 use airx::prelude::*;
-use airx_core::http::{HeaderMap, HeaderName, HeaderValue};
 
 /// 让模型输出“文字海报”的提示词（纯 SVG，不依赖外部资源）。
 pub const POSTER_PROMPT: &str = "请只输出一个 SVG 图片代码，不要 Markdown 代码块，不要解释。\

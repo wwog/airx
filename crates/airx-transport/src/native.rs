@@ -77,12 +77,6 @@ impl ReqwestTransportBuilder {
 impl Transport for ReqwestTransport {
     fn execute(&self, request: HttpRequest) -> BoxFuture<'_, Result<HttpResponse, TransportError>> {
         Box::pin(async move {
-            tracing::debug!(
-                method = %request.method,
-                uri = %request.uri,
-                "airx: sending request"
-            );
-
             let response = self
                 .client
                 .execute(to_reqwest_request(request)?)
@@ -90,7 +84,6 @@ impl Transport for ReqwestTransport {
                 .map_err(map_reqwest_error)?;
 
             let status = response.status();
-            tracing::debug!(status = status.as_u16(), "airx: response received");
             let headers = response.headers().clone();
             let body = response.bytes().await.map_err(map_reqwest_error)?;
 
@@ -103,12 +96,6 @@ impl Transport for ReqwestTransport {
         request: HttpRequest,
     ) -> BoxFuture<'_, Result<HttpStreamResponse, TransportError>> {
         Box::pin(async move {
-            tracing::debug!(
-                method = %request.method,
-                uri = %request.uri,
-                "airx: opening stream"
-            );
-
             let response = self
                 .client
                 .execute(to_reqwest_request(request)?)
@@ -116,7 +103,6 @@ impl Transport for ReqwestTransport {
                 .map_err(map_reqwest_error)?;
 
             let status = response.status();
-            tracing::debug!(status = status.as_u16(), "airx: stream established");
             let headers = response.headers().clone();
             let stream = response
                 .bytes_stream()

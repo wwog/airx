@@ -31,6 +31,8 @@ all-providers = ["openai", "anthropic", "gemini"]
 
 # 能力
 stream = ["airx-core/stream", "airx-protocol/stream", "airx-transport/stream"]
+# 可选：把日志转发到 tracing（scope 映射为 target，如 `airx::net`）
+tracing = ["airx-core/tracing"]
 
 [dependencies]
 airx-core = { version = "0.1.1", path = "../airx-core", default-features = false }
@@ -80,4 +82,8 @@ required-features = ["openai"]
 
 [[example]]
 name = "deepseek_json"
+required-features = ["openai"]
+
+[[example]]
+name = "logging"
 required-features = ["openai"]

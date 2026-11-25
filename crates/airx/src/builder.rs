@@ -10,6 +10,7 @@ use std::time::Duration;
 use airx_core::AirxError;
 use airx_core::error::ConfigurationError;
 use airx_core::http::HeaderMap;
+use airx_core::log::{LogConfig, LogHandle, Logger};
 use airx_transport::{RetryPolicy, Transport};
 
 use crate::executor::Executor;
@@ -21,6 +22,8 @@ pub struct ClientBuilder {
     connect_timeout: Option<Duration>,
     retry_policy: RetryPolicy,
     default_headers: HeaderMap,
+    logger: Option<Arc<dyn Logger>>,
+    log_config: LogConfig,
 }
 
 impl Default for ClientBuilder {
@@ -31,6 +34,8 @@ impl Default for ClientBuilder {
             connect_timeout: None,
             retry_policy: RetryPolicy::default(),
             default_headers: HeaderMap::new(),
+            logger: None,
+            log_config: LogConfig::new(),
         }
     }
 }
@@ -80,6 +85,30 @@ impl ClientBuilder {
         self
     }
 
+    /// 注入日志实现（业务层自定义 sink）。
+    ///
+    /// 只设置 logger 不会产生任何输出：还需要通过 [`ClientBuilder::log_config`]
+    /// 显式打开 scope，默认 [`LogConfig::new`] 关闭全部 scope。
+    #[must_use]
+    pub fn logger(mut self, logger: Arc<dyn Logger>) -> Self {
+        self.logger = Some(logger);
+        self
+    }
+
+    /// 设置日志过滤配置（按 scope 分级开启）。
+    ///
+    /// ```ignore
+    /// let config = LogConfig::new()
+    ///     .scope(Scope::NET, LogLevel::Info)
+    ///     .scope(Scope::CALL, LogLevel::Info);
+    /// let client = Client::builder().logger(logger).log_config(config);
+    /// ```
+    #[must_use]
+    pub fn log_config(mut self, config: LogConfig) -> Self {
+        self.log_config = config;
+        self
+    }
+
     /// 配置 OpenAI Provider。
     #[cfg(feature = "openai")]
     pub fn openai(self) -> OpenAiBuilder {
@@ -119,6 +148,10 @@ impl ClientBuilder {
     /// 把执行配置固化为共享的 [`Executor`]。
     pub(crate) fn build_executor(self) -> Result<Arc<Executor>, AirxError> {
         let retry_policy = self.retry_policy;
+        let log = match self.logger {
+            Some(logger) => LogHandle::new(logger, self.log_config),
+            None => LogHandle::disabled(),
+        };
         let transport = match self.transport {
             Some(transport) => transport,
             None => default_transport(self.timeout, self.connect_timeout)?,
@@ -127,6 +160,7 @@ impl ClientBuilder {
             transport,
             self.default_headers,
             retry_policy,
+            log,
         )))
     }
 }
@@ -246,6 +280,20 @@ impl OpenAiBuilder {
         self
     }
 
+    /// 注入日志实现；需配合 [`OpenAiBuilder::log_config`] 打开 scope。
+    #[must_use]
+    pub fn logger(mut self, logger: Arc<dyn Logger>) -> Self {
+        self.client = self.client.logger(logger);
+        self
+    }
+
+    /// 设置日志过滤配置。
+    #[must_use]
+    pub fn log_config(mut self, config: LogConfig) -> Self {
+        self.client = self.client.log_config(config);
+        self
+    }
+
     /// 构建可复用的 OpenAI 客户端。
     pub fn build(self) -> Result<crate::openai::OpenAi, AirxError> {
         let api_key = self.api_key.ok_or_else(|| {
@@ -343,6 +391,20 @@ impl AnthropicBuilder {
         self
     }
 
+    /// 注入日志实现；需配合 [`AnthropicBuilder::log_config`] 打开 scope。
+    #[must_use]
+    pub fn logger(mut self, logger: Arc<dyn Logger>) -> Self {
+        self.client = self.client.logger(logger);
+        self
+    }
+
+    /// 设置日志过滤配置。
+    #[must_use]
+    pub fn log_config(mut self, config: LogConfig) -> Self {
+        self.client = self.client.log_config(config);
+        self
+    }
+
     /// 构建可复用的 Anthropic 客户端。
     pub fn build(self) -> Result<crate::anthropic::Anthropic, AirxError> {
         let api_key = self.api_key.ok_or_else(|| {
@@ -415,6 +477,20 @@ impl GeminiBuilder {
     #[must_use]
     pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
         self.client = self.client.retry_policy(retry_policy);
+        self
+    }
+
+    /// 注入日志实现；需配合 [`GeminiBuilder::log_config`] 打开 scope。
+    #[must_use]
+    pub fn logger(mut self, logger: Arc<dyn Logger>) -> Self {
+        self.client = self.client.logger(logger);
+        self
+    }
+
+    /// 设置日志过滤配置。
+    #[must_use]
+    pub fn log_config(mut self, config: LogConfig) -> Self {
+        self.client = self.client.log_config(config);
         self
     }
 

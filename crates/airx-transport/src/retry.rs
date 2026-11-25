@@ -138,6 +138,7 @@ mod native {
 
     use airx_core::error::{TransportError, TransportErrorKind};
     use airx_core::http::{HttpRequest, HttpResponse, Method, StatusCode};
+    use airx_core::log::{LogHandle, LogLevel, Scope};
 
     use crate::response::HttpStreamResponse;
     use crate::transport::{BoxFuture, Transport};
@@ -149,12 +150,24 @@ mod native {
     pub struct RetryTransport<T> {
         inner: T,
         policy: RetryPolicy,
+        log: LogHandle,
     }
 
     impl<T> RetryTransport<T> {
-        /// 包装传输实现。
+        /// 包装传输实现（不产生日志）。
         pub fn new(inner: T, policy: RetryPolicy) -> Self {
-            Self { inner, policy }
+            Self {
+                inner,
+                policy,
+                log: LogHandle::disabled(),
+            }
+        }
+
+        /// 接入日志句柄；重试与耗尽事件通过 `retry` scope 输出。
+        #[must_use]
+        pub fn with_log(mut self, log: LogHandle) -> Self {
+            self.log = log;
+            self
         }
 
         /// 当前策略。
@@ -178,15 +191,28 @@ mod native {
                                 && should_retry_response(&request.method, &response)
                             {
                                 let delay = retry_delay(&self.policy, retries, Some(&response));
-                                tracing::debug!(
+                                airx_core::airx_log!(
+                                    self.log,
+                                    Scope::RETRY,
+                                    LogLevel::Warn,
+                                    "retrying after non-success response",
                                     attempt = retries + 1,
                                     delay_ms = delay.as_millis() as u64,
                                     status = response.status.as_u16(),
-                                    "airx: retrying after status"
                                 );
                                 tokio::time::sleep(delay).await;
                                 retries += 1;
                                 continue;
+                            }
+                            if retries > 0 {
+                                airx_core::airx_log!(
+                                    self.log,
+                                    Scope::RETRY,
+                                    LogLevel::Info,
+                                    "retry succeeded",
+                                    attempt = retries,
+                                    status = response.status.as_u16(),
+                                );
                             }
                             return Ok(response);
                         }
@@ -195,15 +221,28 @@ mod native {
                                 && should_retry_error(&request.method, &error)
                             {
                                 let delay = retry_delay(&self.policy, retries, None);
-                                tracing::debug!(
+                                airx_core::airx_log!(
+                                    self.log,
+                                    Scope::RETRY,
+                                    LogLevel::Warn,
+                                    "retrying after transport error",
                                     attempt = retries + 1,
                                     delay_ms = delay.as_millis() as u64,
-                                    error = %error,
-                                    "airx: retrying after transport error"
+                                    kind = error.kind,
                                 );
                                 tokio::time::sleep(delay).await;
                                 retries += 1;
                                 continue;
+                            }
+                            if retries > 0 {
+                                airx_core::airx_log!(
+                                    self.log,
+                                    Scope::RETRY,
+                                    LogLevel::Error,
+                                    "retries exhausted",
+                                    attempt = retries,
+                                    kind = error.kind,
+                                );
                             }
                             return Err(error);
                         }
@@ -561,6 +600,37 @@ mod native_tests {
 
         let response = shared.execute(get()).await.expect("response");
         assert_eq!(response.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn logs_retry_warning_and_success() {
+        use airx_core::log::{LogConfig, LogHandle, Logger, Record};
+
+        #[derive(Default)]
+        struct Collector(std::sync::Mutex<Vec<String>>);
+
+        impl Logger for Collector {
+            fn log(&self, record: &Record<'_>) {
+                self.0.lock().expect("lock").push(record.to_string());
+            }
+        }
+
+        let mock = MockTransport::new();
+        mock.push_json(500, "{}");
+        mock.push_json(200, "{}");
+        let collector = Arc::new(Collector::default());
+        let log = LogHandle::new(
+            collector.clone(),
+            LogConfig::new().scope(airx_core::log::Scope::RETRY, airx_core::log::LogLevel::Info),
+        );
+        let transport = RetryTransport::new(mock.clone(), fast_policy(1)).with_log(log);
+
+        transport.execute(get()).await.expect("response");
+
+        let lines = collector.0.lock().expect("lock").clone();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].starts_with("[retry] retrying after non-success response"));
+        assert!(lines[1].starts_with("[retry] retry succeeded"));
     }
 
     #[tokio::test]

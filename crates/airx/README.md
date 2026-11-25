@@ -58,6 +58,42 @@ async fn main() -> Result<(), AirxError> {
 - **完整历史输入**：`.messages(...)` / `.input_items(...)` / `.contents(...)` 直接接列表，适合业务循环。
 - **Files / Batches / Embeddings / Models / Caches**：类型化端点，未知字段通过 `extensions` 透传。
 - **逃生通道**：`OpenAi/Anthropic/Gemini::execute(HttpRequest)` 与原生 `Endpoint`。
+- **按 scope 分级日志**：业务层注入 `Logger`，用 `{net: Info, call: Info}` 精确打开，
+  默认零输出、零全局状态。
+
+## 日志
+
+```rust
+use std::sync::Arc;
+use airx::prelude::*;
+
+struct MyLogger;
+
+impl Logger for MyLogger {
+    fn log(&self, record: &Record<'_>) {
+        // 同步、快速、不阻塞；需要异步落盘时投递到 channel 后立即返回。
+        eprintln!("[{}][{}] {}", record.scope, record.level, record.message);
+    }
+}
+
+let client = Client::builder()
+    .logger(Arc::new(MyLogger))
+    .log_config(
+        LogConfig::new()
+            .scope(Scope::NET, LogLevel::Info)
+            .scope(Scope::CALL, LogLevel::Info),
+    )
+    .openai()
+    .api_key("sk-...")
+    .build()?;
+# Ok::<(), AirxError>(())
+```
+
+- 级别：`Error` / `Warn` / `Info` / `Debug` / `Trace`；配置某级别输出该级别及更严重的级别。
+- scope：`net` / `call` / `stream` / `retry` / `protocol`，也可 `Scope::new("custom")`。
+- 默认完全静默：只传 `logger` 不传 `log_config` 不会产生输出。
+- 不记录请求体、响应体、认证 Header；URI 只记录 path（不含 query）。
+- `tracing` feature 提供 `TracingLogger` 适配器，scope 映射为 `airx::net` / `airx::call` 等 target。
 
 ## Feature
 
@@ -68,6 +104,7 @@ async fn main() -> Result<(), AirxError> {
 | `compression` | gzip / brotli / deflate | ✅ |
 | `openai` / `anthropic` / `gemini` | 协议模块 | ✅（`all-providers`） |
 | `stream` | 流式 API | ✅ |
+| `tracing` | `TracingLogger` 适配器 | — |
 
 ## 子 crate
 

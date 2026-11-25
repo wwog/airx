@@ -35,7 +35,37 @@ assert_eq!(event.data, "{\"ok\":true}");
 
 ## Feature
 
-- `tracing`：启用可选日志（默认关闭）。
+- `tracing`：额外提供 `log::TracingLogger` 适配器，把日志转发到 `tracing`
+  （scope 映射为 `airx::net` 等 target）。日志类型本身不受 feature 控制，始终可用。
+
+## 日志
+
+`log` 模块只定义类型与过滤规则，不产生 IO：
+
+```rust
+use std::sync::Arc;
+use airx_core::log::{LogConfig, LogHandle, LogLevel, Logger, Record, Scope};
+
+struct Stderr;
+
+impl Logger for Stderr {
+    fn log(&self, record: &Record<'_>) {
+        eprintln!("[{}][{}] {}", record.scope, record.level, record.message);
+    }
+}
+
+let log = LogHandle::new(
+    Arc::new(Stderr),
+    LogConfig::new()
+        .scope(Scope::NET, LogLevel::Info)
+        .scope(Scope::CALL, LogLevel::Info),
+);
+
+assert!(log.enabled(Scope::NET, LogLevel::Warn));
+assert!(!log.enabled(Scope::RETRY, LogLevel::Warn));
+```
+
+配置某级别表示输出该级别及更严重的级别；未配置的 scope 默认 `Off`。
 
 ## License
 

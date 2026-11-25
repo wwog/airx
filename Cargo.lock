@@ -60,7 +60,6 @@ dependencies = [
  "reqwest",
  "thiserror",
  "tokio",
- "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-streams 0.7.1",

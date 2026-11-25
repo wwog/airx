@@ -28,8 +28,20 @@ mod response;
 mod stream;
 
 pub use airx_core::AirxError;
+pub use airx_core::airx_log;
+pub use airx_core::http;
+pub use airx_core::log::{LogConfig, LogHandle, LogLevel, Logger, Scope};
 pub use airx_protocol::{Endpoint, StreamingEndpoint};
 pub use airx_transport::{RetryPolicy, Transport};
+// 公开 API 中直接出现的外部类型：统一从门面重导出，
+// 调用方无需再直接依赖 `bytes` / `futures-core`。
+pub use bytes::Bytes;
+pub use futures_core::Stream;
+
+/// 分级、按 scope 过滤的日志类型。
+pub mod log {
+    pub use airx_core::log::*;
+}
 
 #[cfg(feature = "anthropic")]
 pub use anthropic::{Anthropic, AnthropicBatches, AnthropicFiles, AnthropicModels, Messages};

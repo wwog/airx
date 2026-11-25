@@ -11,6 +11,7 @@ use std::task::{Context, Poll};
 
 use airx_core::AirxError;
 use airx_core::error::StreamError;
+use airx_core::log::{LogHandle, LogLevel, Scope, Timer};
 use airx_core::stream::{SseDecoder, StreamStatus};
 use airx_protocol::StreamingEndpoint;
 use airx_transport::ByteStream;
@@ -27,6 +28,10 @@ pub struct ProtocolStream<P: StreamingEndpoint> {
     sse: SseDecoder,
     finished: bool,
     meta: StreamMeta,
+    log: LogHandle,
+    timer: Timer,
+    events: u64,
+    ended: bool,
 }
 
 impl<P: StreamingEndpoint> std::fmt::Debug for ProtocolStream<P> {
@@ -34,18 +39,23 @@ impl<P: StreamingEndpoint> std::fmt::Debug for ProtocolStream<P> {
         f.debug_struct("ProtocolStream")
             .field("finished", &self.finished)
             .field("meta", &self.meta)
+            .field("events", &self.events)
             .finish_non_exhaustive()
     }
 }
 
 impl<P: StreamingEndpoint> ProtocolStream<P> {
-    pub(crate) fn new(endpoint: P, bytes: ByteStream, meta: StreamMeta) -> Self {
+    pub(crate) fn new(endpoint: P, bytes: ByteStream, meta: StreamMeta, log: LogHandle) -> Self {
         Self {
             endpoint,
             bytes,
             sse: SseDecoder::new(),
             finished: false,
             meta,
+            log,
+            timer: Timer::start(),
+            events: 0,
+            ended: false,
         }
     }
 
@@ -62,6 +72,67 @@ impl<P: StreamingEndpoint> ProtocolStream<P> {
     /// request id（若有）。
     pub fn request_id(&self) -> Option<&str> {
         self.meta.request_id.as_deref()
+    }
+
+    /// 记录一次流结束；只记录第一次。
+    fn log_end(&mut self, failure: Option<&AirxError>) {
+        if self.ended {
+            return;
+        }
+        self.ended = true;
+
+        let request_id = self.meta.request_id.as_deref().unwrap_or("-");
+        let status = self.meta.status.as_u16();
+        match failure {
+            Some(error) => {
+                airx_core::airx_log!(
+                    self.log,
+                    Scope::STREAM,
+                    LogLevel::Error,
+                    "stream failed",
+                    status = status,
+                    request_id = request_id,
+                    events = self.events,
+                    error = error,
+                    elapsed = self.timer.elapsed(),
+                );
+                airx_core::airx_log!(
+                    self.log,
+                    Scope::CALL,
+                    LogLevel::Error,
+                    "call failed",
+                    stream = true,
+                    status = status,
+                    request_id = request_id,
+                    events = self.events,
+                    error = error,
+                    elapsed = self.timer.elapsed(),
+                );
+            }
+            None => {
+                airx_core::airx_log!(
+                    self.log,
+                    Scope::STREAM,
+                    LogLevel::Info,
+                    "stream ended",
+                    status = status,
+                    request_id = request_id,
+                    events = self.events,
+                    elapsed = self.timer.elapsed(),
+                );
+                airx_core::airx_log!(
+                    self.log,
+                    Scope::CALL,
+                    LogLevel::Info,
+                    "call completed",
+                    stream = true,
+                    status = status,
+                    request_id = request_id,
+                    events = self.events,
+                    elapsed = self.timer.elapsed(),
+                );
+            }
+        }
     }
 }
 
@@ -90,35 +161,57 @@ impl<P: StreamingEndpoint + Unpin> Stream for ProtocolStream<P> {
 
             match this.sse.next_event() {
                 Ok(Some(raw)) => match this.endpoint.decode_event(raw) {
-                    Ok(Some(event)) => return Poll::Ready(Some(Ok(event))),
+                    Ok(Some(event)) => {
+                        this.events += 1;
+                        return Poll::Ready(Some(Ok(event)));
+                    }
                     Ok(None) => continue,
-                    Err(error) => return Poll::Ready(Some(Err(error))),
+                    Err(error) => {
+                        this.log_end(Some(&error));
+                        return Poll::Ready(Some(Err(error)));
+                    }
                 },
                 Ok(None) => {}
                 Err(error) => {
-                    return Poll::Ready(Some(Err(AirxError::Stream(error))));
+                    let error = AirxError::Stream(error);
+                    this.log_end(Some(&error));
+                    return Poll::Ready(Some(Err(error)));
                 }
             }
 
             match this.bytes.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(chunk))) => this.sse.push(&chunk),
                 Poll::Ready(Some(Err(error))) => {
-                    return Poll::Ready(Some(Err(AirxError::Transport(error))));
+                    let error = AirxError::Transport(error);
+                    this.log_end(Some(&error));
+                    return Poll::Ready(Some(Err(error)));
                 }
                 Poll::Ready(None) => {
                     this.finished = true;
-                    match this.sse.finish() {
+                    let flushed = match this.sse.finish() {
                         Ok(Some(raw)) => match this.endpoint.decode_event(raw) {
-                            Ok(Some(event)) => return Poll::Ready(Some(Ok(event))),
-                            Ok(None) => {}
-                            Err(error) => return Poll::Ready(Some(Err(error))),
+                            Ok(Some(event)) => {
+                                this.events += 1;
+                                Some(event)
+                            }
+                            Ok(None) => None,
+                            Err(error) => {
+                                this.log_end(Some(&error));
+                                return Poll::Ready(Some(Err(error)));
+                            }
                         },
-                        Ok(None) => {}
+                        Ok(None) => None,
                         Err(error) => {
-                            return Poll::Ready(Some(Err(AirxError::Stream(error))));
+                            let error = AirxError::Stream(error);
+                            this.log_end(Some(&error));
+                            return Poll::Ready(Some(Err(error)));
                         }
+                    };
+                    this.log_end(None);
+                    match flushed {
+                        Some(event) => return Poll::Ready(Some(Ok(event))),
+                        None => return Poll::Ready(None),
                     }
-                    return Poll::Ready(None);
                 }
                 Poll::Pending => return Poll::Pending,
             }

@@ -36,7 +36,6 @@ http.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest = { workspace = true, optional = true }

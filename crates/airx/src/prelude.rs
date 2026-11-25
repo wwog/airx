@@ -16,7 +16,13 @@
 //! # Ok::<(), AirxError>(())
 //! ```
 
+pub use airx_core::airx_log;
+// 公开 API 中直接出现的外部类型：`HeaderMap` 等由门面重导出，
+// 调用方无需再直接依赖 `http`。
+pub use airx_core::http::{HeaderMap, HeaderName, HeaderValue};
+pub use airx_core::log::{LogConfig, LogHandle, LogLevel, Logger, Record, Scope};
 pub use airx_core::{AirxError, ApiVersion, ModelId, ProviderId};
+pub use bytes::Bytes;
 #[cfg(feature = "anthropic")]
 pub use airx_protocol::anthropic::batches::{
     BatchList as AnthropicBatchList, BatchRequestItem,

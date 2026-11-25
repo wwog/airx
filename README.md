@@ -182,6 +182,50 @@ let embedding = openai.embeddings().create(
 
 Anthropic 提供 Files / Batches；Gemini 提供 Embeddings（文件/批处理使用原生 Endpoint）。
 
+## 日志
+
+日志按 **scope** 独立开启，业务层注入实现，默认完全静默：
+
+```rust,ignore
+use std::sync::Arc;
+use airx::prelude::*;
+
+struct MyLogger;
+
+impl Logger for MyLogger {
+    fn log(&self, record: &Record<'_>) {
+        // 同步、快速、不阻塞；需要异步落盘时投递到 channel 后立即返回。
+        eprintln!("[{}][{}] {} {:?}", record.scope, record.level, record.message, record.fields);
+    }
+}
+
+// 等价于 {net: Info, call: Info}
+let config = LogConfig::new()
+    .scope(Scope::NET, LogLevel::Info)
+    .scope(Scope::CALL, LogLevel::Info);
+
+let client = Client::builder()
+    .logger(Arc::new(MyLogger))
+    .log_config(config)
+    .openai()
+    .api_key("sk-...")
+    .build()?;
+```
+
+| scope | 关键事件 |
+| --- | --- |
+| `net` | 发送请求、收到响应、非 2xx、传输失败 |
+| `call` | 调用完成（状态码 / request id / 耗时）、调用失败 |
+| `stream` | 流建立、流结束、流失败或截断 |
+| `retry` | 准备重试、重试成功、重试耗尽 |
+| `protocol` | 请求编码 / 响应解码失败 |
+
+- 级别：`Error` < `Warn` < `Info` < `Debug` < `Trace`；配置某级别输出该级别及更严重级别。
+- 未传 `logger` 或未传 `log_config` 都不产生输出。
+- 不记录请求体、响应体、认证 Header；URI 只记录 path（不含 query）。
+- `tracing` feature 提供 `TracingLogger`：scope 映射为 `airx::net` / `airx::call` 等 target，
+  可用 `RUST_LOG=airx::net=info,airx::call=info` 二次过滤。
+
 ## Feature
 
 默认启用 `native + rustls-tls + compression + all-providers + stream`，即三协议开箱即用。
@@ -198,6 +242,7 @@ Anthropic 提供 Files / Batches；Gemini 提供 Embeddings（文件/批处理�
 | `anthropic` | Anthropic Messages | ✅（经 `all-providers`） |
 | `gemini` | Gemini `generateContent` + `streamGenerateContent` | ✅（经 `all-providers`） |
 | `stream` | 流式 API：`ProtocolStream`、各协议事件、Accumulator | ✅ |
+| `tracing` | `TracingLogger` 适配器（日志转发到 tracing） | — |
 
 按需裁剪（只保留 OpenAI + 流式）：
 
