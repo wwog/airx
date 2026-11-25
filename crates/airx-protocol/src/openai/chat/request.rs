@@ -110,10 +110,7 @@ pub struct ChatCompletionRequest {
     /// 结构化输出格式。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
-    /// 是否流式。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stream: Option<bool>,
-    /// 流式选项。
+    /// 流式选项（仅 `Chat::stream` 生效）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<StreamOptions>,
     /// 未识别的扩展字段。
@@ -169,7 +166,6 @@ pub struct ChatCompletionRequestBuilder {
     tool_choice: Option<ToolChoice>,
     parallel_tool_calls: Option<bool>,
     response_format: Option<ResponseFormat>,
-    stream: Option<bool>,
     stream_options: Option<StreamOptions>,
     extensions: Extensions,
 }
@@ -395,14 +391,7 @@ impl ChatCompletionRequestBuilder {
         self
     }
 
-    /// 设置流式标记。
-    #[must_use]
-    pub fn stream(mut self, stream: bool) -> Self {
-        self.stream = Some(stream);
-        self
-    }
-
-    /// 设置流式选项。
+    /// 设置流式选项（仅 `Chat::stream` 生效）。
     #[must_use]
     pub fn stream_options(mut self, options: StreamOptions) -> Self {
         self.stream_options = Some(options);
@@ -456,7 +445,6 @@ impl ChatCompletionRequestBuilder {
             tool_choice: self.tool_choice,
             parallel_tool_calls: self.parallel_tool_calls,
             response_format: self.response_format,
-            stream: self.stream,
             stream_options: self.stream_options,
             extensions: self.extensions,
         })
@@ -505,7 +493,6 @@ mod tests {
             .user("hi")
             .tools([Tool::function("lookup", json!({"type": "object"}), None)])
             .tool_choice(ToolChoice::auto())
-            .stream(true)
             .stream_options(StreamOptions {
                 include_usage: true,
                 include_obfuscation: None,
@@ -516,7 +503,6 @@ mod tests {
         let value = serde_json::to_value(&request).expect("serialize");
         assert_eq!(value["tools"][0]["type"], "function");
         assert_eq!(value["tool_choice"], "auto");
-        assert_eq!(value["stream"], true);
         assert_eq!(value["stream_options"]["include_usage"], true);
     }
 
@@ -676,11 +662,10 @@ mod production_params_tests {
     }
 
     #[test]
-    fn stream_include_obfuscation_serializes() {
+    fn stream_options_include_obfuscation_serializes() {
         let request = ChatCompletionRequest::builder()
             .model("m")
             .user("hi")
-            .stream(true)
             .stream_options(StreamOptions {
                 include_usage: true,
                 include_obfuscation: Some(false),

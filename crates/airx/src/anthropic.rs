@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use airx_core::AirxError;
-use airx_core::error::ConfigurationError;
 use airx_core::http::{HttpRequest, HttpResponse};
 use airx_core::model::ModelId;
 use airx_protocol::anthropic::AnthropicConfig;
@@ -135,11 +134,7 @@ impl Messages {
     }
 
     /// 创建一次非流式消息。
-    ///
-    /// 请求里 `stream == true` 时直接返回 `Configuration` 错误：SSE 响应体交给 JSON
-    /// 解码只会得到难以定位的 `Deserialization`，应改用 [`Messages::stream`]。
     pub async fn create(&self, request: MessagesRequest) -> Result<MessagesResponse, AirxError> {
-        reject_streaming(&request)?;
         self.api.create_with(&request, &self.options).await
     }
 
@@ -148,7 +143,6 @@ impl Messages {
         &self,
         request: MessagesRequest,
     ) -> Result<WithMeta<MessagesResponse>, AirxError> {
-        reject_streaming(&request)?;
         self.api.create_with_meta(&request, &self.options).await
     }
 
@@ -186,21 +180,10 @@ impl Messages {
     #[cfg(feature = "stream")]
     pub async fn stream(
         &self,
-        mut request: MessagesRequest,
+        request: MessagesRequest,
     ) -> Result<ProtocolStream<MessagesEndpoint>, AirxError> {
-        request.stream = Some(true);
         self.api.stream_with(&request, &self.options).await
     }
-}
-
-/// 非流式入口拒绝 `stream = true`。
-fn reject_streaming(request: &MessagesRequest) -> Result<(), AirxError> {
-    if request.stream == Some(true) {
-        return Err(AirxError::Configuration(ConfigurationError::new(
-            "MessagesRequest.stream=true 需要走 messages().stream()；create() 只解码普通 JSON 响应",
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(feature = "stream")]

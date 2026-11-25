@@ -1,13 +1,13 @@
 //! Chat Completions 端点：编码 / 解码（纯函数）。
 
 use airx_core::AirxError;
-use airx_core::error::{DeserializationError, SerializationError};
+use airx_core::error::DeserializationError;
 use airx_core::http::{HeaderValue, HttpRequest, HttpResponse, Uri, header};
 use airx_core::model::ProviderId;
 use airx_core::stream::RawEvent;
 use serde_json::Value;
 
-use crate::endpoint::{Endpoint, StreamingEndpoint};
+use crate::endpoint::{Endpoint, StreamingEndpoint, encode_json_body, encode_json_stream_body};
 use crate::openai::common::error::{error_from_response, error_from_stream_value};
 use crate::openai::config::OpenAiConfig;
 
@@ -39,16 +39,8 @@ impl ChatEndpoint {
         self.config
             .endpoint_uri(self.config.chat_path(), "Chat Completions")
     }
-}
 
-impl Endpoint for ChatEndpoint {
-    type Request = ChatCompletionRequest;
-    type Response = ChatCompletionResponse;
-
-    fn encode(&self, request: &Self::Request) -> Result<HttpRequest, AirxError> {
-        let body = serde_json::to_vec(request)
-            .map_err(|error| AirxError::Serialization(SerializationError::from(error)))?;
-
+    fn http(&self, body: Vec<u8>) -> Result<HttpRequest, AirxError> {
         let mut http = HttpRequest::post(self.uri()?).with_body(body);
         http.headers.insert(
             header::CONTENT_TYPE,
@@ -57,6 +49,15 @@ impl Endpoint for ChatEndpoint {
         self.config.apply_headers(&mut http)?;
 
         Ok(http)
+    }
+}
+
+impl Endpoint for ChatEndpoint {
+    type Request = ChatCompletionRequest;
+    type Response = ChatCompletionResponse;
+
+    fn encode(&self, request: &Self::Request) -> Result<HttpRequest, AirxError> {
+        self.http(encode_json_body(request)?)
     }
 
     fn decode(&self, response: HttpResponse) -> Result<ChatCompletionResponse, AirxError> {
@@ -76,6 +77,10 @@ impl Endpoint for ChatEndpoint {
 
 impl StreamingEndpoint for ChatEndpoint {
     type Event = ChatStreamEvent;
+
+    fn encode_stream(&self, request: &Self::Request) -> Result<HttpRequest, AirxError> {
+        self.http(encode_json_stream_body(request)?)
+    }
 
     fn decode_event(&self, event: RawEvent) -> Result<Option<Self::Event>, AirxError> {
         if event.data == "[DONE]" {

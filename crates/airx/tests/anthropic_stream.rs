@@ -124,26 +124,27 @@ async fn messages_stream_skips_ping_and_accumulates() {
 }
 
 #[tokio::test]
-async fn messages_create_rejects_stream_true() {
+async fn messages_create_does_not_send_stream_flag() {
     let mock = MockTransport::new();
-    let request = MessagesRequest::builder()
-        .model("claude-3-5-sonnet")
-        .max_tokens(128)
-        .user("hello")
-        .stream(true)
-        .build()
-        .expect("request");
-    let error = client(&mock)
-        .messages()
-        .create(request)
-        .await
-        .expect_err("configuration error");
-
-    assert!(
-        matches!(error, AirxError::Configuration(_)),
-        "got {error:?}"
+    mock.push_json(
+        200,
+        r#"{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-5-sonnet","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
     );
-    assert!(mock.requests().is_empty());
+    client(&mock)
+        .messages()
+        .create(
+            MessagesRequest::builder()
+                .model("claude-3-5-sonnet")
+                .max_tokens(128)
+                .user("hello")
+                .build()
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    let sent: serde_json::Value = serde_json::from_slice(&mock.requests()[0].body).expect("body");
+    assert!(sent.get("stream").is_none(), "非流式请求不应携带 stream");
 }
 
 #[tokio::test]

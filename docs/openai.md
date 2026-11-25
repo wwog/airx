@@ -169,7 +169,10 @@ let request = ChatCompletionRequest::builder()
 | `.service_tier(...)` / `.store(bool)` / `.metadata(value)` | 同名 | 服务档位、stored completions 前置条件、审计元数据 |
 | `.tools(...)` / `.tool_choice(...)` / `.parallel_tool_calls(bool)` | 同名 | 客户端函数工具 |
 | `.response_format(...)` | `response_format` | `text` / `json_object` / `json_schema` |
-| `.stream(...)` / `.stream_options(...)` / `.extension(k, v)` | 同名 / 顶层字段 | 流式设置（`include_usage` / `include_obfuscation`）、未建模参数透传 |
+| `.stream_options(...)` / `.extension(k, v)` | `stream_options` / 顶层字段 | 流式选项（`include_usage` / `include_obfuscation`）、未建模参数透传 |
+
+流式不再由请求字段控制：`ChatCompletionRequest` 没有 `stream` 字段，`stream: true`
+由 `chat().stream()` 在端点编码时注入。
 
 仍可用 `.extension(...)` 透传 `logit_bias`、`prediction`、`web_search_options` 等未建模字段。
 `ChatMessage::developer("...")` 对应官方 `developer` 角色（o-series / gpt-5 起取代 `system`）；
@@ -309,15 +312,15 @@ println!("{}", response.output_text());
 | `.context_management([...])` | 同名 | 服务端压缩（`ContextManagement::compaction(threshold)`） |
 | `.prompt(...)` / `.user(...)` | 同名 | 可复用提示词模板 / 终端用户标识 |
 | `.prompt_cache_key(...)` / `.prompt_cache_options(...)` / `.prompt_cache_retention(...)` | 同名 | 提示词缓存 |
-| `.stream(bool)` / `.stream_options(...)` / `.extension(key, value)` | 同名 / 顶层字段 | 流式标记（`include_obfuscation`）、未建模参数 |
+| `.stream_options(...)` / `.extension(key, value)` | `stream_options` / 顶层字段 | 流式选项（`include_obfuscation`）、未建模参数 |
 
 `TextFormat::JsonSchema { name, description, schema, strict }` 用于结构化输出；
 `parse_as::<T>` 读取 `output_text()` 后做 serde 解析。`text.format` 同样是请求参数而非
 feature，可与 `responses().stream(request)` 组合；流式下需用 `final_text()`（或
 `final_response()`）累积完整文本后自行 serde 反序列化，`parse_as` 仅支持非流式请求。
 
-`create` / `create_with_meta` 会在 `stream == Some(true)` 时直接返回
-`AirxError::Configuration`（SSE 无法按 JSON 解码），流式请求请用 `stream()`。
+`ResponsesRequest` 同样没有 `stream` 字段，`stream: true` 由 `responses().stream()`
+在端点编码时注入。
 
 ### 5.2 输入 item 与输出 item
 
@@ -405,8 +408,8 @@ let data = response.data; // 类型化响应
 
 | 入口 | 自动行为 |
 | --- | --- |
-| `client.chat().stream(req)` | `stream=true`；未设置 `stream_options` 时自动 `include_usage=true` |
-| `client.responses().stream(req)` | `stream=true` |
+| `client.chat().stream(req)` | 端点编码注入 `stream=true`；未设置 `stream_options` 时自动 `include_usage=true` |
+| `client.responses().stream(req)` | 端点编码注入 `stream=true` |
 
 `ProtocolStream` 实现 `futures_core::Stream<Item = Result<Event, AirxError>>`，
 可直接使用 `TryStreamExt`、`select!`；也提供 `next()`、`meta()`、`request_id()`。
@@ -711,7 +714,7 @@ airx 不会轮询 `tool_calls`、不会执行函数、不会维护多轮会话�
 ## 11. 最佳实践 / 常见坑
 
 - **`max_tokens` 已弃用**：新代码使用 `max_completion_tokens`（含推理 token）；o-series 与 `max_tokens` 不兼容。
-- **`create` 不接受 `stream=true`**：会返回配置错误；流式请用 `stream()`。
+- **流式只由入口决定**：`create()` / `stream()` 是两条独立路径，请求类型里没有 `stream` 字段，不存在「设错字段」的用法。
 - **流式不重试**：429 / 5xx 在流式请求上直接返回错误。
 - **429 配额类不重试**：`insufficient_quota` / `credit_balance_exhausted` / `*_spend_limit_*` 会立即返回（重试不会恢复访问）。
 - **整体超时会截断长流**：`ClientBuilder::timeout` 是总时长；长流通常只依赖连接超时。

@@ -100,9 +100,6 @@ pub struct MessagesRequest {
     /// 容器（代码执行 / skills 复用）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerRef>,
-    /// 是否流式。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stream: Option<bool>,
     /// 未识别的扩展字段。
     #[serde(flatten)]
     pub extensions: Extensions,
@@ -638,10 +635,11 @@ impl ThinkingConfig {
     }
 }
 
-/// 已被类型化建模的 `MessagesRequest` 字段名。
+/// 由结构体字段或端点层写入的 `MessagesRequest` 字段名。
 ///
 /// 这些键不允许再出现在 `extensions` 里：`#[serde(flatten)]` 会与结构体字段各写
-/// 一次，产出重复 JSON 键，语义取决于解析器。
+/// 一次，产出重复 JSON 键，语义取决于解析器。`stream` 由流式端点编码时注入，
+/// 同样不允许调用方手写。
 const MODELED_FIELDS: &[&str] = &[
     "model",
     "max_tokens",
@@ -697,7 +695,6 @@ pub struct MessagesRequestBuilder {
     inference_geo: Option<String>,
     diagnostics: Option<DiagnosticsParam>,
     container: Option<ContainerRef>,
-    stream: Option<bool>,
     extensions: Extensions,
 }
 
@@ -864,13 +861,6 @@ impl MessagesRequestBuilder {
         self
     }
 
-    /// 设置流式标记。
-    #[must_use]
-    pub fn stream(mut self, stream: bool) -> Self {
-        self.stream = Some(stream);
-        self
-    }
-
     /// 添加扩展字段。
     ///
     /// 只用于未建模字段；与已建模字段重名时 `build()` 直接报错。
@@ -914,7 +904,6 @@ impl MessagesRequestBuilder {
             inference_geo: self.inference_geo,
             diagnostics: self.diagnostics,
             container: self.container,
-            stream: self.stream,
             extensions: self.extensions,
         })
     }

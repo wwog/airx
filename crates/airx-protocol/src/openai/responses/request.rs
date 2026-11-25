@@ -764,10 +764,7 @@ pub struct ResponsesRequest {
     /// 最大工具调用次数。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tool_calls: Option<u32>,
-    /// 是否流式。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stream: Option<bool>,
-    /// 流式选项。
+    /// 流式选项（仅 `Responses::stream` 生效）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<ResponsesStreamOptions>,
     /// 未识别的扩展字段。
@@ -813,7 +810,6 @@ pub struct ResponsesRequestBuilder {
     prompt_cache_retention: Option<String>,
     safety_identifier: Option<String>,
     max_tool_calls: Option<u32>,
-    stream: Option<bool>,
     stream_options: Option<ResponsesStreamOptions>,
     extensions: Extensions,
 }
@@ -1042,14 +1038,7 @@ impl ResponsesRequestBuilder {
         self
     }
 
-    /// 设置流式标记。
-    #[must_use]
-    pub fn stream(mut self, stream: bool) -> Self {
-        self.stream = Some(stream);
-        self
-    }
-
-    /// 设置流式选项。
+    /// 设置流式选项（仅 `Responses::stream` 生效）。
     #[must_use]
     pub fn stream_options(mut self, options: ResponsesStreamOptions) -> Self {
         self.stream_options = Some(options);
@@ -1098,7 +1087,6 @@ impl ResponsesRequestBuilder {
             prompt_cache_retention: self.prompt_cache_retention,
             safety_identifier: self.safety_identifier,
             max_tool_calls: self.max_tool_calls,
-            stream: self.stream,
             stream_options: self.stream_options,
             extensions: self.extensions,
         })

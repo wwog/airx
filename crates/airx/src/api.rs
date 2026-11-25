@@ -216,7 +216,7 @@ impl<P: StreamingEndpoint + Clone> ApiClient<P> {
         request: &P::Request,
         options: &RequestOptions,
     ) -> Result<ProtocolStream<P>, AirxError> {
-        let mut http_request = self.encode(request)?;
+        let mut http_request = self.encode_stream(request)?;
         accept(&mut http_request, "text/event-stream");
         let context = CallContext::new(&http_request);
 
@@ -286,6 +286,13 @@ impl<P: StreamingEndpoint + Clone> ApiClient<P> {
             error = error,
             elapsed = context.timer.elapsed(),
         );
+    }
+
+    /// 编码流式请求；失败时记录 `protocol` 日志。
+    fn encode_stream(&self, request: &P::Request) -> Result<HttpRequest, AirxError> {
+        self.endpoint.encode_stream(request).inspect_err(|error| {
+            self.log_protocol("encode_stream", error);
+        })
     }
 }
 

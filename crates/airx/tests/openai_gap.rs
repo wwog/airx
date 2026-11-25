@@ -4,7 +4,6 @@
 #![cfg(feature = "openai")]
 
 use airx::prelude::*;
-use airx_core::AirxError;
 use airx_core::http::Method;
 use airx_protocol::openai::chat::{
     ChatCompletionListRequest, ChatCompletionUpdateRequest, StreamOptions,
@@ -26,57 +25,42 @@ fn client(mock: &MockTransport) -> OpenAi {
         .expect("client")
 }
 
-fn chat_request(stream: bool) -> ChatCompletionRequest {
+fn chat_request() -> ChatCompletionRequest {
     ChatCompletionRequest::builder()
         .model("gpt-4o-mini")
         .user("hi")
-        .stream(stream)
-        .build()
-        .expect("request")
-}
-
-fn responses_request(stream: bool) -> ResponsesRequest {
-    ResponsesRequest::builder()
-        .model("gpt-5")
-        .input("hi")
-        .stream(stream)
         .build()
         .expect("request")
 }
 
 #[tokio::test]
-async fn create_rejects_stream_true_with_configuration_error() {
+async fn create_does_not_send_stream_flag() {
     let mock = MockTransport::new();
-    // 不需要任何响应：请求应在发送前被拒绝。
-    let error = client(&mock)
-        .chat()
-        .create(chat_request(true))
-        .await
-        .expect_err("configuration error");
-    match error {
-        AirxError::Configuration(error) => {
-            assert!(error.to_string().contains("stream"));
-        }
-        other => panic!("unexpected: {other:?}"),
-    }
-    assert_eq!(mock.request_count(), 0);
-
-    let error = client(&mock)
-        .responses()
-        .create(responses_request(true))
-        .await
-        .expect_err("configuration error");
-    assert!(matches!(error, AirxError::Configuration(_)));
-    assert_eq!(mock.request_count(), 0);
-
-    // stream=false 正常发送。
     mock.push_json(200, r#"{"id":"c1","model":"m","choices":[]}"#);
     client(&mock)
         .chat()
-        .create(chat_request(false))
+        .create(chat_request())
         .await
         .expect("response");
-    assert_eq!(mock.request_count(), 1);
+
+    let sent: Value = serde_json::from_slice(&mock.requests()[0].body).expect("body");
+    assert!(sent.get("stream").is_none(), "非流式请求不应携带 stream");
+
+    mock.push_json(200, r#"{"id":"r1","model":"gpt-5","output":[]}"#);
+    client(&mock)
+        .responses()
+        .create(
+            ResponsesRequest::builder()
+                .model("gpt-5")
+                .input("hi")
+                .build()
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    let sent: Value = serde_json::from_slice(&mock.requests()[1].body).expect("body");
+    assert!(sent.get("stream").is_none(), "非流式请求不应携带 stream");
 }
 
 #[tokio::test]
@@ -236,7 +220,7 @@ async fn quota_429_is_not_retried_by_default_policy() {
 
     let error = client(&mock)
         .chat()
-        .create(chat_request(false))
+        .create(chat_request())
         .await
         .expect_err("quota error");
     assert!(error.is_rate_limit());

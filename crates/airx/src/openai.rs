@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use airx_core::AirxError;
-use airx_core::error::ConfigurationError;
 use airx_core::http::{HttpRequest, HttpResponse};
 use airx_core::model::ModelId;
 use airx_protocol::openai::OpenAiConfig;
@@ -189,14 +188,10 @@ impl Chat {
     }
 
     /// 创建一次非流式对话补全。
-    ///
-    /// `request.stream == Some(true)` 会被拒绝（配置错误）：SSE 无法按 JSON 解码，
-    /// 请改用 [`Chat::stream`]。
     pub async fn create(
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, AirxError> {
-        ensure_non_streaming(request.stream, "Chat::create", "Chat::stream")?;
         self.api.create_with(&request, &self.options).await
     }
 
@@ -205,7 +200,6 @@ impl Chat {
         &self,
         request: ChatCompletionRequest,
     ) -> Result<WithMeta<ChatCompletionResponse>, AirxError> {
-        ensure_non_streaming(request.stream, "Chat::create_with_meta", "Chat::stream")?;
         self.api.create_with_meta(&request, &self.options).await
     }
 
@@ -277,13 +271,13 @@ impl Chat {
 
     /// 创建一次流式对话补全。
     ///
-    /// 自动设置 `stream: true` 并请求最后一个 chunk 携带 usage。
+    /// 流式标记由端点编码时注入；未设置 `stream_options` 时默认请求最后一个
+    /// chunk 携带 usage。
     #[cfg(feature = "stream")]
     pub async fn stream(
         &self,
         mut request: ChatCompletionRequest,
     ) -> Result<ProtocolStream<ChatEndpoint>, AirxError> {
-        request.stream = Some(true);
         if request.stream_options.is_none() {
             request.stream_options = Some(StreamOptions {
                 include_usage: true,
@@ -314,11 +308,7 @@ impl Responses {
     }
 
     /// 创建一次非流式响应。
-    ///
-    /// `request.stream == Some(true)` 会被拒绝（配置错误）；请改用
-    /// [`Responses::stream`]。
     pub async fn create(&self, request: ResponsesRequest) -> Result<ResponsesResponse, AirxError> {
-        ensure_non_streaming(request.stream, "Responses::create", "Responses::stream")?;
         self.api.create_with(&request, &self.options).await
     }
 
@@ -327,11 +317,6 @@ impl Responses {
         &self,
         request: ResponsesRequest,
     ) -> Result<WithMeta<ResponsesResponse>, AirxError> {
-        ensure_non_streaming(
-            request.stream,
-            "Responses::create_with_meta",
-            "Responses::stream",
-        )?;
         self.api.create_with_meta(&request, &self.options).await
     }
 
@@ -435,9 +420,8 @@ impl Responses {
     #[cfg(feature = "stream")]
     pub async fn stream(
         &self,
-        mut request: ResponsesRequest,
+        request: ResponsesRequest,
     ) -> Result<ProtocolStream<ResponsesEndpoint>, AirxError> {
-        request.stream = Some(true);
         self.api.stream_with(&request, &self.options).await
     }
 }
@@ -695,18 +679,4 @@ impl OpenAiModerations {
         );
         api.create_with(&request, &self.options).await
     }
-}
-
-/// 非流式入口拒绝 `stream: true`：SSE 无法按 JSON 解码，提前给出配置错误。
-fn ensure_non_streaming(
-    stream: Option<bool>,
-    method: &str,
-    alternative: &str,
-) -> Result<(), AirxError> {
-    if stream == Some(true) {
-        return Err(AirxError::Configuration(ConfigurationError::new(format!(
-            "{method} 不接受 stream=true；流式请求请使用 {alternative}"
-        ))));
-    }
-    Ok(())
 }

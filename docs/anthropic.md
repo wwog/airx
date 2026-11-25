@@ -53,7 +53,7 @@ let response = client.messages().create(request).await?;
 println!("{}", response.text());
 ```
 
-最小流式调用（`stream()` 会自动把请求的 `stream` 置为 `true`）：
+最小流式调用（`stream()` 会在端点编码时注入 `stream: true`）：
 
 ```rust,ignore
 use futures_util::TryStreamExt;
@@ -207,8 +207,9 @@ let response = client.messages().with_options(options).create(request).await?;
 | `.inference_geo(str)` | `inference_geo` | 数据驻留区域 |
 | `.diagnostics(DiagnosticsParam)` | `diagnostics.previous_message_id` | 缓存未命中诊断 |
 | `.container(ContainerRef)` | `container` | 容器 ID 或 `ContainerParam`（skills） |
-| `.stream(bool)` | `stream` | `stream()` 会自动置位；`create()` 拒绝 `true`（见 5.2） |
 | `.extension(key, value)` | 原样透传 | 见 8.1；与已建模字段重名时 `build()` 报错 |
+
+流式不经过请求字段：`MessagesRequest` 没有 `stream`，由 `messages().stream()` 编码时注入。
 
 **`temperature` / `top_p` / `top_k` 已从最新 Messages API 移除**，airx 也没有对应字段。
 推理投入用 `output_config.effort`，结构化输出用 `output_config.format`（可同时设置）：
@@ -347,7 +348,7 @@ let choice = ToolChoice::tool("lookup").disable_parallel_tool_use(true);
 
 | 方法 | 返回 | 说明 |
 | --- | --- | --- |
-| `create(request)` | `MessagesResponse` | 2xx 反序列化；非 2xx 映射为 `ProviderError` / `HttpError`；`stream: true` 直接报 `Configuration` |
+| `create(request)` | `MessagesResponse` | 2xx 反序列化；非 2xx 映射为 `ProviderError` / `HttpError` |
 | `create_with_meta(request)` | `WithMeta<MessagesResponse>` | 额外提供 status / headers / request_id / raw_body |
 | `parse_as::<T>(request)` | `T` | 把 `response.text()` 当 JSON 做 serde 解析（**不做 schema 注入 / 校验**） |
 
@@ -448,8 +449,8 @@ println!("已收到 {} 字，错误: {:?}", partial.text(), error);
 工具参数增量在 `finish()` 时拼接并解析；非法 JSON 返回 `AirxError::Deserialization`，
 不会静默变成字符串。`snapshot()` 用宽松模式，便于展示。
 
-`create()` 收到 `stream: true` 会直接返回 `Configuration` 错误：把 SSE 响应体交给 JSON
-解码只会得到难以定位的 `Deserialization`。
+`MessagesRequest` 没有 `stream` 字段，`stream: true` 由 `messages().stream()` 在端点编码
+时注入；`create()` 与 `stream()` 是两条独立路径，不存在设错字段的用法。
 
 ## 6. 计 token 与模型列表
 
@@ -605,8 +606,9 @@ let request = MessagesRequest::builder()
 1. **已建模字段用类型化入口。** `model` / `max_tokens` / `messages` / `system` /
    `output_config` / `stop_sequences` / `tools` / `tool_choice` / `thinking` /
    `cache_control` / `metadata` / `service_tier` / `speed` / `inference_geo` /
-   `diagnostics` / `container` / `stream` 都不能再写进 `extensions`：`flatten` 会与结构体
+   `diagnostics` / `container` 都不能再写进 `extensions`：`flatten` 会与结构体
    字段各写一次，产出重复 JSON 键。`build()` 会直接返回 `Configuration` 错误拦截这种写法。
+   `stream` 也保留为禁用键——它由流式端点编码时注入，手写会导致重复键。
 2. **Header 参数不是 body 字段。** `workspace_id` / `user_profile_id` 用
    `RequestOptions::{workspace, user_profile}`（见 3.4），写进 extensions 无效。
 3. **beta 字段要带 beta Header。** `context_management` / `compaction` / `mcp_servers`
